@@ -1,0 +1,30 @@
+{
+  "health": {"statusCode": 200, "body": {"ok": true}},
+  "unauthorized": {"statusCode": 401, "body": {"error": "unauthorized"}},
+  "session": {
+    "id": "sesn_1",
+    "title": "Contract session",
+    "status": "idle",
+    "createdAt": "2026-09-03T00:00:00Z",
+    "archivedAt": null,
+    "environmentId": "env_test",
+    "metadata": {"owner_id": "principal-1"}
+  },
+  "managed_event": {
+    "id": "evt_1",
+    "type": "agent.message",
+    "content": [{"type": "text", "text": "hello"}]
+  },
+  "slack_message_v1": {
+    "version": 1,
+    "slackEventId": "Ev1",
+    "teamId": "T1",
+    "channelId": "C1",
+    "threadTs": "10.1",
+    "messageTs": "10.1",
+    "userId": "U1",
+    "text": "hello",
+    "command": "message",
+    "eventType": "app_mention"
+  }
+}

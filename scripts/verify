@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+export UV_CACHE_DIR="${UV_CACHE_DIR:-$PWD/.uv-cache}"
+export PYTHONDONTWRITEBYTECODE=1
+
+usage() {
+  echo "Usage: ./scripts/verify [--fast|--full]" >&2
+}
+
+stage() {
+  local name="$1"
+  shift
+  echo
+  echo "==> $name"
+  "$@"
+}
+
+mode="${1:---full}"
+if [[ $# -gt 1 || "$mode" != "--fast" && "$mode" != "--full" ]]; then
+  usage
+  exit 2
+fi
+
+stage "architecture" uv run --directory backend python ../scripts/check_architecture.py
+stage "persistence contract" uv run --directory backend python ../scripts/check_persistence_contract.py
+stage "test rails" uv run --directory backend python ../scripts/check_test_rails.py
+stage "repository rails" uv run --directory backend python ../scripts/check_repository_rails.py
+stage "public readiness" python3 scripts/check_public_readiness.py
+stage "lint" npm run lint
+stage "python formatting" npm run format:check:python
+stage "typecheck" npm run typecheck
+stage "frontend unit tests" npm run test:web
+stage "python unit and contract tests" \
+  uv run --directory backend pytest --ignore=tests/integration
+
+if [[ "$mode" == "--fast" ]]; then
+  echo
+  echo "Fast verification passed."
+  exit 0
+fi
+
+stage "production-built web e2e" ./scripts/e2e-production-web.sh
+stage "lambda artifacts" ./scripts/build_python_lambdas.sh
+stage "terraform" ./scripts/check_terraform.sh
+stage "postgres integration and semantic e2e" ./scripts/e2e.sh
+
+echo
+echo "Full verification passed."

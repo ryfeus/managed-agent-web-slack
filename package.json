@@ -1,0 +1,50 @@
+{
+  "name": "managed-agent-web-slack",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build:web && npm run build:python",
+    "build:web": "npm run build -w @managed-agents/web",
+    "build:python": "./scripts/build_python_lambdas.sh",
+    "dev": "./scripts/dev.sh",
+    "lint": "eslint apps/web e2e playwright.config.ts playwright.live.config.ts playwright.production.config.ts && UV_CACHE_DIR=.uv-cache uv run --directory backend ruff check src tests ../scripts/check_architecture.py ../scripts/check_persistence_contract.py ../scripts/check_public_readiness.py ../scripts/check_repository_rails.py ../scripts/check_test_rails.py ../scripts/render_slack_manifest.py ../scripts/render_terraform_backend.py",
+    "format:check:python": "UV_CACHE_DIR=.uv-cache uv run --directory backend ruff format --check src tests ../scripts/check_architecture.py ../scripts/check_persistence_contract.py ../scripts/check_public_readiness.py ../scripts/check_repository_rails.py ../scripts/check_test_rails.py ../scripts/render_slack_manifest.py ../scripts/render_terraform_backend.py",
+    "format:python": "UV_CACHE_DIR=.uv-cache uv run --directory backend ruff format src tests ../scripts/check_architecture.py ../scripts/check_persistence_contract.py ../scripts/check_public_readiness.py ../scripts/check_repository_rails.py ../scripts/check_test_rails.py ../scripts/render_slack_manifest.py ../scripts/render_terraform_backend.py",
+    "typecheck": "npm run typecheck -w @managed-agents/web && tsc -p e2e/tsconfig.json && UV_CACHE_DIR=.uv-cache uv run --directory backend mypy src",
+    "test": "npm run test:web && npm run test:python",
+    "test:web": "vitest run apps/web/lib/managed-agent-reducer.test.ts",
+    "test:python": "UV_CACHE_DIR=.uv-cache uv run --directory backend pytest",
+    "test:watch": "vitest apps/web/lib/managed-agent-reducer.test.ts",
+    "db:migrate": "UV_CACHE_DIR=.uv-cache uv run --directory backend python -m managed_agents_app.operations migrate",
+    "db:seed": "UV_CACHE_DIR=.uv-cache uv run --directory backend python -m managed_agents_app.operations seed",
+    "db:map-slack": "UV_CACHE_DIR=.uv-cache uv run --directory backend python -m managed_agents_app.operations map-slack",
+    "secrets:sync": "UV_CACHE_DIR=.uv-cache uv run --directory backend python -m managed_agents_app.operations sync-secrets",
+    "slack:manifest": "python3 scripts/render_slack_manifest.py",
+    "terraform:validate": "./scripts/check_terraform.sh",
+    "deploy": "./scripts/deploy.sh",
+    "deploy:plan": "./scripts/deploy.sh --plan-only",
+    "e2e": "./scripts/e2e.sh",
+    "e2e:ui": "./scripts/e2e.sh --ui",
+    "e2e:debug": "./scripts/e2e.sh --debug",
+    "dev:e2e": "./scripts/e2e.sh --dev",
+    "e2e:live": "./scripts/e2e-live.sh",
+    "e2e:db:migrate": "APP_ENV=e2e DATABASE_MODE=postgres uv run --directory backend python -m managed_agents_app.operations migrate"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.35.0",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^22.18.1",
+    "concurrently": "^9.2.1",
+    "eslint": "^9.35.0",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.42.0",
+    "vitest": "^4.1.11"
+  }
+}

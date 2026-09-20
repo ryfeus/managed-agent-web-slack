@@ -1,0 +1,18 @@
+[
+  {
+    "id": "KL-001",
+    "title": "No production per-session input sequencer",
+    "status": "open",
+    "owner": "architecture",
+    "test": "e2e/concurrency.spec.ts",
+    "desired_behavior": "Inputs for one Managed Agent session execute in accepted order."
+  },
+  {
+    "id": "KL-002",
+    "title": "No provider idempotency key for Managed Agent input send",
+    "status": "open",
+    "owner": "architecture",
+    "test": "e2e/sqs.spec.ts",
+    "desired_behavior": "A crash after Anthropic accepts an input but before DSQL records completion must not duplicate the Managed Agent input."
+  }
+]

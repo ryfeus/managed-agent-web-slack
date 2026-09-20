@@ -1,0 +1,68 @@
+_metadata:
+  major_version: 2
+  minor_version: 2
+display_information:
+  name: Claude Managed Agent
+  description: Continue durable Claude Managed Agent sessions from Slack or the web application.
+  background_color: "#191919"
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  agent_view:
+    agent_description: A durable Claude Managed Agent that can continue the same authorized session in Slack and on the web.
+    suggested_prompts:
+      - title: Investigate a question
+        message: Investigate this question and recommend next steps.
+      - title: Summarize
+        message: Summarize the current context and identify decisions.
+  bot_user:
+    display_name: Claude Managed Agent
+    always_online: false
+  shortcuts:
+    - name: Ask agent about this
+      callback_id: ask_agent
+      description: Ask the managed agent to analyze this message.
+      type: message
+    - name: Summarize this thread
+      callback_id: summarize_thread
+      description: Summarize this thread and its decisions.
+      type: message
+    - name: Investigate this
+      callback_id: investigate
+      description: Investigate this message and recommend next steps.
+      type: message
+  unfurl_domains:
+    - __PUBLIC_APP_HOST__
+oauth_config:
+  scopes:
+    bot:
+      - assistant:write
+      - chat:write
+      - app_mentions:read
+      - im:history
+      - channels:history
+      - groups:history
+      - commands
+      - links:read
+      - links:write
+      - reactions:write
+settings:
+  event_subscriptions:
+    request_url: __PUBLIC_APP_URL__/slack/events
+    bot_events:
+      - app_mention
+      - message.im
+      - message.channels
+      - message.groups
+      - app_home_opened
+      - app_context_changed
+      - agent_session_stopped
+      - link_shared
+  interactivity:
+    is_enabled: true
+    request_url: __PUBLIC_APP_URL__/slack/interactions
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: managed_agents
+      POSTGRES_PASSWORD: managed_agents
+      POSTGRES_DB: managed_agents_e2e
+    ports:
+      - "127.0.0.1:${E2E_POSTGRES_PORT:-54321}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U managed_agents -d managed_agents_e2e"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data

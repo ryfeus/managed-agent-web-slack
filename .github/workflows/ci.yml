@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  fast-verifier:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: npm ci
+      - run: uv sync --directory backend --locked
+      - run: ./scripts/verify --fast
+
+  lambda-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: ./scripts/build_python_lambdas.sh
+
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.14.3"
+      - run: mkdir -p dist/lambdas && touch dist/lambdas/python-buffered.zip dist/lambdas/web-stream.zip
+      - run: ./scripts/check_terraform.sh
+
+  semantic-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: npm ci
+      - run: uv sync --directory backend --locked
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: local-e2e-failure
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
+  production-web-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: npm ci
+      - run: uv sync --directory backend --locked
+      - run: npx playwright install --with-deps chromium
+      - run: ./scripts/e2e-production-web.sh
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: production-web-e2e-failure
+          path: |
+            playwright-report-production/
+            test-results/
+          retention-days: 7

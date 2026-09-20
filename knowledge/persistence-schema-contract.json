@@ -1,0 +1,87 @@
+{
+  "tables": {
+    "schema_migrations": [
+      "version",
+      "applied_at"
+    ],
+    "principals": [
+      "principal_id",
+      "display_name",
+      "created_at"
+    ],
+    "external_identities": [
+      "identity_id",
+      "principal_id",
+      "provider",
+      "tenant_id",
+      "external_user_id",
+      "created_at"
+    ],
+    "agent_sessions": [
+      "session_id",
+      "principal_id",
+      "agent_id",
+      "environment_id",
+      "created_by_surface",
+      "created_at",
+      "archived_at"
+    ],
+    "surface_bindings": [
+      "binding_id",
+      "session_id",
+      "surface",
+      "tenant_id",
+      "external_thread_id",
+      "created_at"
+    ],
+    "ingress_events": [
+      "ingress_id",
+      "surface",
+      "external_event_id",
+      "status",
+      "session_id",
+      "managed_event_id",
+      "attempts",
+      "lease_expires_at",
+      "last_error",
+      "created_at",
+      "updated_at"
+    ],
+    "projection_events": [
+      "binding_id",
+      "managed_event_id",
+      "status",
+      "attempts",
+      "lease_expires_at",
+      "last_error",
+      "slack_message_ts",
+      "projected_at"
+    ],
+    "agent_feedback": [
+      "feedback_id",
+      "interaction_id",
+      "principal_id",
+      "session_id",
+      "managed_event_id",
+      "surface",
+      "external_message_id",
+      "rating",
+      "reason",
+      "created_at"
+    ],
+    "slack_response_streams": [
+      "binding_id",
+      "request_event_id",
+      "session_id",
+      "status",
+      "slack_message_ts",
+      "last_managed_event_id",
+      "final_managed_event_id",
+      "attempts",
+      "lease_expires_at",
+      "last_error",
+      "created_at",
+      "updated_at"
+    ]
+  }
+}
