@@ -1,14 +1,16 @@
+"""Cookie-authenticated Web identity and application thread metadata API."""
+
 from __future__ import annotations
 
 import json
 import os
 import re
 import uuid
-from contextlib import suppress
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
+from managed_agents_app.agents.registry import DEFAULT_APPLICATION_AGENT_ID
 from managed_agents_app.auth import (
     clear_session_cookie,
     create_session_cookie,
@@ -16,28 +18,15 @@ from managed_agents_app.auth import (
     verify_access_token,
 )
 from managed_agents_app.config import load_config
-from managed_agents_app.db import Database, IngressClaim
-from managed_agents_app.handlers.http import headers, response
+from managed_agents_app.db.thread_repository import BindingConflict, ThreadRepository
+from managed_agents_app.http import headers, raw_body, response
 from managed_agents_app.logging import log
-from managed_agents_app.managed_agent.events import tool_is_pending
-from managed_agents_app.ports.agent import AgentGateway
 from managed_agents_app.runtime import Runtime, get_runtime
 
 
-class CreateSessionBody(BaseModel):
+class CreateThreadBody(BaseModel):
     clientRequestId: uuid.UUID
     title: str | None = Field(default=None, min_length=1, max_length=60)
-
-
-class MessageBody(BaseModel):
-    clientRequestId: uuid.UUID
-    text: str = Field(min_length=1, max_length=20_000)
-
-
-class ConfirmationBody(BaseModel):
-    toolUseId: str = Field(min_length=1)
-    approved: bool
-    reason: str | None = Field(default=None, max_length=1000)
 
 
 def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
@@ -51,7 +40,7 @@ def handle_request(runtime: Runtime, event: dict[str, Any]) -> dict[str, Any]:
     request_headers = headers(event)
     origin = request_headers.get("origin", "")
     cors = {
-        "access-control-allow-origin": origin if origin.startswith("http://localhost:") else origin,
+        "access-control-allow-origin": origin,
         "access-control-allow-credentials": "true",
         "access-control-allow-headers": "content-type",
         "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
@@ -63,6 +52,19 @@ def handle_request(runtime: Runtime, event: dict[str, Any]) -> dict[str, Any]:
     except Exception as error:
         log("error", "web_api_error", error=str(error))
         return response(500, {"error": "internal server error"}, extra_headers=cors)
+
+
+def _thread_json(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row["thread_id"]),
+        "agentId": str(row["agent_id"]),
+        "title": row["title"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+        "archivedAt": row["archived_at"],
+        "lastTaskId": row["last_task_id"],
+        "lastTaskState": row["last_task_state"],
+    }
 
 
 def _route(
@@ -90,116 +92,58 @@ def _route(
         secure = request_headers.get("x-forwarded-proto") != "http" and os.getenv("APP_ENV") == "production"
         return response(200, {"ok": True}, extra_headers=cors, cookies=[clear_session_cookie(secure=secure)])
 
-    auth = _authenticate(request_headers.get("cookie"), runtime)
+    principal_id = principal_from_cookie(request_headers.get("cookie"), config.web_cookie_secret)
     if path == "/api/auth/session" and method == "GET":
-        return response(200 if auth else 401, {"authenticated": bool(auth)}, extra_headers=cors)
-    if not auth:
-        return response(401, {"error": "unauthorized"}, extra_headers=cors)
-    principal_id, db, managed = auth
-
-    if path == "/api/sessions" and method == "GET":
-        sessions = []
-        for row in db.list_sessions(principal_id):
-            try:
-                sessions.append(managed.retrieve_session(str(row["session_id"])).model_dump())
-            except Exception:
-                continue
-        return response(200, {"data": sessions}, extra_headers=cors)
-
-    if path == "/api/sessions" and method == "POST":
-        create_body = _validate(CreateSessionBody, event, cors)
-        if isinstance(create_body, dict):
-            return create_body
-        request_id = str(create_body.clientRequestId)
-        claim = db.claim_ingress("web-session", request_id)
-        if claim == IngressClaim.BUSY:
-            return response(202, {"status": "pending"}, extra_headers=cors)
-        session = managed.find_by_creation_request_id(request_id)
-        try:
-            if not session:
-                session = managed.create_session(
-                    principal_id=principal_id,
-                    surface="web",
-                    creation_request_id=request_id,
-                    title=create_body.title,
-                )
-            db.register_session(session.id, principal_id, config.agent_id, config.environment_id, "web")
-            db.complete_ingress("web-session", request_id, session.id)
-            log("info", "web_session_created", principal_id=principal_id, session_id=session.id)
-            return response(201, session.model_dump(), extra_headers=cors)
-        except Exception as error:
-            db.fail_ingress("web-session", request_id, str(error))
-            raise
-
-    match = re.fullmatch(r"/api/sessions/([^/]+)(?:/(archive|events|messages|confirm|interrupt))?", path)
-    if not match:
-        return response(404, {"error": "not found"}, extra_headers=cors)
-    session_id, action = match.groups()
-    if not db.owns_session(principal_id, session_id):
-        return response(404, {"error": "session not found"}, extra_headers=cors)
-    if not action and method == "GET":
-        return response(200, managed.retrieve_session(session_id).model_dump(), extra_headers=cors)
-    if action == "archive" and method == "POST":
-        managed.archive(session_id)
-        db.mark_session_archived(principal_id, session_id)
-        return response(200, {"ok": True}, extra_headers=cors)
-    if action == "events" and method == "GET":
-        return response(200, {"data": managed.list_events(session_id)}, extra_headers=cors)
-    if action == "messages" and method == "POST":
-        message_body = _validate(MessageBody, event, cors)
-        if isinstance(message_body, dict):
-            return message_body
-        request_id = str(message_body.clientRequestId)
-        if db.claim_ingress("web-message", request_id) != IngressClaim.ACQUIRED:
-            return response(202, {"ok": True, "duplicate": True}, extra_headers=cors)
-        try:
-            text = message_body.text.strip()
-            managed_event_id = managed.send_message(session_id, text)
-            db.complete_ingress("web-message", request_id, session_id, managed_event_id)
-            with suppress(Exception):
-                managed.update_title(session_id, text)
-            return response(202, {"ok": True, "managedEventId": managed_event_id}, extra_headers=cors)
-        except Exception as error:
-            db.fail_ingress("web-message", request_id, str(error))
-            raise
-    if action == "confirm" and method == "POST":
-        confirmation_body = _validate(ConfirmationBody, event, cors)
-        if isinstance(confirmation_body, dict):
-            return confirmation_body
-        if not tool_is_pending(managed.list_events(session_id), confirmation_body.toolUseId):
-            return response(409, {"error": "tool approval is no longer pending"}, extra_headers=cors)
-        managed.confirm_tool(
-            session_id,
-            confirmation_body.toolUseId,
-            confirmation_body.approved,
-            confirmation_body.reason,
+        return response(
+            200 if principal_id else 401, {"authenticated": bool(principal_id)}, extra_headers=cors
         )
-        return response(202, {"ok": True}, extra_headers=cors)
-    if action == "interrupt" and method == "POST":
-        managed.interrupt(session_id)
-        return response(202, {"ok": True}, extra_headers=cors)
-    return response(404, {"error": "not found"}, extra_headers=cors)
-
-
-def _authenticate(cookie: str | None, runtime: Runtime) -> tuple[str, Database, AgentGateway] | None:
-    config = runtime.config
-    principal_id = principal_from_cookie(cookie, config.web_cookie_secret)
     if not principal_id:
-        return None
-    return principal_id, runtime.db, runtime.agent
+        return response(401, {"error": "unauthorized"}, extra_headers=cors)
+
+    threads: ThreadRepository = runtime.threads
+    if path == "/api/threads" and method == "GET":
+        return response(
+            200,
+            {"data": [_thread_json(row) for row in threads.list_threads(principal_id)]},
+            extra_headers=cors,
+        )
+    if path == "/api/threads" and method == "POST":
+        try:
+            body = CreateThreadBody.model_validate(_json(event))
+        except ValidationError:
+            return response(400, {"error": "invalid request"}, extra_headers=cors)
+        try:
+            row = threads.create_thread_idempotent(
+                principal_id, DEFAULT_APPLICATION_AGENT_ID, str(body.clientRequestId), body.title
+            )
+        except BindingConflict:
+            return response(409, {"error": "creation request conflict"}, extra_headers=cors)
+        return response(201, _thread_json(row), extra_headers=cors)
+
+    match = re.fullmatch(r"/api/threads/([0-9a-fA-F-]+)(?:/(archive|restore))?", path)
+    if match is None:
+        return response(404, {"error": "not found"}, extra_headers=cors)
+    thread_id, action = match.groups()
+    try:
+        thread_id = str(uuid.UUID(thread_id))
+    except ValueError:
+        return response(404, {"error": "not found"}, extra_headers=cors)
+    owned = threads.get_owned_thread(principal_id, thread_id)
+    if owned is None:
+        return response(404, {"error": "thread not found"}, extra_headers=cors)
+    if action is None and method == "GET":
+        return response(200, _thread_json(owned), extra_headers=cors)
+    if action == "archive" and method == "POST":
+        row = threads.archive_thread(principal_id, thread_id) or owned
+        return response(200, _thread_json(row), extra_headers=cors)
+    if action == "restore" and method == "POST":
+        row = threads.restore_thread(principal_id, thread_id) or owned
+        return response(200, _thread_json(row), extra_headers=cors)
+    return response(404, {"error": "not found"}, extra_headers=cors)
 
 
 def _json(event: dict[str, Any]) -> Any:
     try:
-        return json.loads(event.get("body") or "null")
+        return json.loads(raw_body(event) or "null")
     except json.JSONDecodeError:
         return None
-
-
-def _validate[T: BaseModel](
-    model: type[T], event: dict[str, Any], cors: dict[str, str]
-) -> T | dict[str, Any]:
-    try:
-        return model.model_validate(_json(event))
-    except ValidationError as error:
-        return response(400, {"error": "invalid request", "issues": error.errors()}, extra_headers=cors)

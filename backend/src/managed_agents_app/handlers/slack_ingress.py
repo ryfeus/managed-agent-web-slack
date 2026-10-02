@@ -5,7 +5,7 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from managed_agents_app.config import load_config
-from managed_agents_app.handlers.http import headers, raw_body, response
+from managed_agents_app.http import headers, raw_body, response
 from managed_agents_app.logging import log
 from managed_agents_app.runtime import Runtime, get_runtime
 from managed_agents_app.slack import (
@@ -59,7 +59,9 @@ def handle_request(runtime: Runtime, event: dict[str, Any]) -> dict[str, Any]:
             payload = json.loads(body)
             if payload.get("type") == "url_verification" and isinstance(payload.get("challenge"), str):
                 return response(200, {"challenge": payload["challenge"]})
-            normalized = normalize_event(payload)
+            normalized = normalize_event(
+                payload, allowed_bot_id=config.slack_user_bot_id, allowed_app_id=config.slack_user_app_id
+            )
     except json.JSONDecodeError, TypeError, ValueError:
         return response(400, {"error": "invalid payload"})
 

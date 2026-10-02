@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +61,7 @@ def migrate() -> None:
         # migrations use idempotent DDL so a partially applied file is safe to
         # rerun before its version marker is written.
         for statement in _statements(path.read_text()):
-            _execute_admin(config, statement)
+            _execute_migration_statement(config, statement)
         _execute_admin(
             config,
             "INSERT INTO schema_migrations (version) VALUES (%s)",
@@ -154,6 +155,53 @@ def sync_secrets() -> None:
 
 def _statements(source: str) -> list[str]:
     return [statement.strip() for statement in re.split(r";\s*(?:\n|$)", source) if statement.strip()]
+
+
+def _execute_migration_statement(config: AppConfig, statement: str) -> None:
+    index = re.match(
+        r"^(CREATE\s+(?:UNIQUE\s+)?INDEX)\s+(?!ASYNC\b)(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\b",
+        statement,
+        re.I,
+    )
+    if config.database_mode == "postgres" or index is None:
+        _execute_admin(config, statement)
+        return
+
+    # PostgreSQL accepts CREATE INDEX; DSQL requires ASYNC even for an existing table.
+    async_statement = statement.replace(index.group(1), index.group(1) + " ASYNC", 1)
+    with connect(config, "admin") as conn, conn.cursor() as cur:
+        cur.execute(async_statement)
+        row = cur.fetchone() if cur.description else None
+        job_id = str(row["job_id"]) if row and row.get("job_id") else None
+    _wait_for_dsql_index(config, index.group(2), job_id)
+
+
+def _wait_for_dsql_index(config: AppConfig, index_name: str, job_id: str | None) -> None:
+    if job_id:
+        deadline = time.monotonic() + 300
+        while True:
+            with connect(config, "admin") as conn, conn.cursor() as cur:
+                cur.execute("SELECT status, details FROM sys.jobs WHERE job_id = %s", (job_id,))
+                job = cur.fetchone()
+            if job is None or job["status"] == "completed":
+                break
+            if job["status"] == "failed":
+                raise RuntimeError(f"DSQL index build failed for {index_name}: {job['details']}")
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"DSQL index build timed out for {index_name}")
+            time.sleep(1)
+
+    # IF NOT EXISTS can return no job ID on a retry. Never mark the migration
+    # applied until its unique index is valid, whether newly built or preexisting.
+    with connect(config, "admin") as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT i.indisvalid AS valid FROM pg_index i "
+            "JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = %s",
+            (index_name,),
+        )
+        index = cur.fetchone()
+    if index is None or not index["valid"]:
+        raise RuntimeError(f"DSQL index is not valid: {index_name}")
 
 
 def _execute_admin(config: AppConfig, statement: str, parameters: tuple[object, ...] = ()) -> None:

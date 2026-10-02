@@ -27,7 +27,9 @@ stage "architecture" uv run --directory backend python ../scripts/check_architec
 stage "persistence contract" uv run --directory backend python ../scripts/check_persistence_contract.py
 stage "test rails" uv run --directory backend python ../scripts/check_test_rails.py
 stage "repository rails" uv run --directory backend python ../scripts/check_repository_rails.py
+stage "CMA configuration" python3 scripts/cma_lock.py validate
 stage "public readiness" python3 scripts/check_public_readiness.py
+stage "deployment guard" python3 scripts/test_deploy_guard.py
 stage "lint" npm run lint
 stage "python formatting" npm run format:check:python
 stage "typecheck" npm run typecheck

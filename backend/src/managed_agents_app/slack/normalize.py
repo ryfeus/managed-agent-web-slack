@@ -8,22 +8,22 @@ from typing import Any
 from managed_agents_app.domain import (
     SLACK_FEEDBACK_RECEIVED,
     SLACK_MESSAGE_RECEIVED,
-    SLACK_SESSION_LINK_REQUESTED,
-    SLACK_SESSION_LINK_SHARED,
-    SLACK_SESSION_STOP_REQUESTED,
     SLACK_SHORTCUT_RECEIVED,
+    SLACK_THREAD_LINK_REQUESTED,
+    SLACK_THREAD_LINK_SHARED,
+    SLACK_THREAD_STOP_REQUESTED,
     SLACK_TOOL_CONFIRMATION_REQUESTED,
     SlackFeedbackReceived,
     SlackMessageReceived,
-    SlackSessionLinkRequested,
-    SlackSessionLinkShared,
-    SlackSessionStopRequested,
     SlackShortcutReceived,
+    SlackThreadLinkRequested,
+    SlackThreadLinkShared,
+    SlackThreadStopRequested,
     SlackToolConfirmationRequested,
 )
 from managed_agents_app.slack.signatures import interaction_id
 
-SESSION_RE = re.compile(r"^link\s+(sesn_[A-Za-z0-9_-]+)$", re.IGNORECASE)
+THREAD_RE = re.compile(r"^link\s+([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$", re.I)
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,9 @@ class ModalOpenRequest:
     metadata: dict[str, str]
 
 
-def normalize_event(envelope: dict[str, Any]) -> tuple[str, Any] | None:
+def normalize_event(
+    envelope: dict[str, Any], *, allowed_bot_id: str | None = None, allowed_app_id: str | None = None
+) -> tuple[str, Any] | None:
     if (
         envelope.get("type") != "event_callback"
         or not envelope.get("event_id")
@@ -41,7 +43,16 @@ def normalize_event(envelope: dict[str, Any]) -> tuple[str, Any] | None:
         return None
     event = envelope.get("event") or {}
     event_type = event.get("type")
-    if event.get("bot_id") or event.get("subtype"):
+    allowed_app_bot = bool(
+        event_type in {"app_mention", "message"}
+        and allowed_bot_id
+        and allowed_app_id
+        and event.get("bot_id") == allowed_bot_id
+        and event.get("app_id") == allowed_app_id
+    )
+    if event.get("subtype") and not (event.get("subtype") == "bot_message" and allowed_app_bot):
+        return None
+    if event.get("bot_id") and not allowed_app_bot:
         return None
 
     if event_type in {"app_mention", "message"}:
@@ -51,7 +62,7 @@ def normalize_event(envelope: dict[str, Any]) -> tuple[str, Any] | None:
         if event_type == "message" and channel_type != "im" and not event.get("thread_ts"):
             return None
         text = re.sub(r"<@[A-Z0-9]+>", "", str(event.get("text") or ""), flags=re.IGNORECASE).strip()
-        link = SESSION_RE.match(text)
+        link = THREAD_RE.match(text)
         context = event.get("context") or envelope.get("context")
         return (
             SLACK_MESSAGE_RECEIVED,
@@ -64,7 +75,7 @@ def normalize_event(envelope: dict[str, Any]) -> tuple[str, Any] | None:
                 user_id=event["user"],
                 text=text,
                 command="link" if link else "message",
-                link_session_id=link.group(1) if link else None,
+                link_thread_id=link.group(1) if link else None,
                 channel_type=channel_type,
                 active_context=context if isinstance(context, dict) else None,
                 event_type=event_type,
@@ -75,8 +86,8 @@ def normalize_event(envelope: dict[str, Any]) -> tuple[str, Any] | None:
         isinstance(event.get(key), str) for key in ("user", "channel", "thread_ts")
     ):
         return (
-            SLACK_SESSION_STOP_REQUESTED,
-            SlackSessionStopRequested(
+            SLACK_THREAD_STOP_REQUESTED,
+            SlackThreadStopRequested(
                 event_id=envelope["event_id"],
                 team_id=envelope["team_id"],
                 channel_id=event["channel"],
@@ -92,8 +103,8 @@ def normalize_event(envelope: dict[str, Any]) -> tuple[str, Any] | None:
         if not urls:
             return None
         return (
-            SLACK_SESSION_LINK_SHARED,
-            SlackSessionLinkShared(
+            SLACK_THREAD_LINK_SHARED,
+            SlackThreadLinkShared(
                 event_id=envelope["event_id"],
                 team_id=envelope["team_id"],
                 channel_id=event["channel"],
@@ -154,7 +165,8 @@ def normalize_interaction(
                     channel_id=metadata["channel_id"],
                     thread_ts=metadata["thread_ts"],
                     user_id=user_id,
-                    tool_use_id=metadata["tool_use_id"],
+                    task_id=metadata["task_id"],
+                    input_request_id=metadata["request_id"],
                     approved=False,
                     reason=reason,
                     response_message_ts=metadata.get("response_message_ts"),
@@ -175,17 +187,28 @@ def normalize_interaction(
         trigger_id = payload.get("trigger_id")
         if not trigger_id:
             return None
+        try:
+            identifiers = json.loads(value)
+            task_id, request_id = identifiers["taskId"], identifiers["requestId"]
+        except ValueError, TypeError, KeyError:
+            return None
         return ModalOpenRequest(
             trigger_id=trigger_id,
             metadata={
                 "team_id": team_id,
                 "channel_id": channel_id,
                 "thread_ts": thread_ts,
-                "tool_use_id": value,
+                "task_id": task_id,
+                "request_id": request_id,
                 "response_message_ts": message_ts or "",
             },
         )
     if action_id in {"agent_tool_allow", "agent_tool_deny"}:
+        try:
+            identifiers = json.loads(value)
+            task_id, request_id = identifiers["taskId"], identifiers["requestId"]
+        except ValueError, TypeError, KeyError:
+            return None
         return (
             SLACK_TOOL_CONFIRMATION_REQUESTED,
             SlackToolConfirmationRequested(
@@ -194,7 +217,8 @@ def normalize_interaction(
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 user_id=user_id,
-                tool_use_id=value,
+                task_id=task_id,
+                input_request_id=request_id,
                 approved=action_id == "agent_tool_allow",
                 response_message_ts=message_ts,
             ),
@@ -205,7 +229,9 @@ def normalize_interaction(
             block_id = next(
                 (block.get("block_id") for block in payload.get("message", {}).get("blocks", [])), ""
             )
-        managed_event_id = block_id.removeprefix("feedback:") if block_id.startswith("feedback:") else None
+        identifiers = block_id.split(":", 2)
+        if len(identifiers) != 3 or identifiers[0] != "feedback":
+            return None
         return (
             SLACK_FEEDBACK_RECEIVED,
             SlackFeedbackReceived(
@@ -215,20 +241,21 @@ def normalize_interaction(
                 thread_ts=thread_ts,
                 user_id=user_id,
                 rating=value,
-                managed_event_id=managed_event_id,
+                task_id=identifiers[1],
+                message_id=identifiers[2],
                 external_message_id=message_ts,
             ),
         )
-    if action_id == "agent_link_session":
+    if action_id == "agent_link_thread":
         return (
-            SLACK_SESSION_LINK_REQUESTED,
-            SlackSessionLinkRequested(
+            SLACK_THREAD_LINK_REQUESTED,
+            SlackThreadLinkRequested(
                 interaction_id=identity,
                 team_id=team_id,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 user_id=user_id,
-                session_id=value,
+                thread_id=value,
             ),
         )
     return None

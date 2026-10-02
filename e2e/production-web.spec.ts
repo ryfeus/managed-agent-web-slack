@@ -1,35 +1,36 @@
 import { test, expect, login, send } from './helpers/fixtures';
-import { control, state, ready, answerEvents, drain } from './helpers/api';
-import { slackTurn } from './helpers/slack';
+import { control, state, drain } from './helpers/api';
 
-test('PROD-WEB-001 static export authenticates and completes a streamed turn', async ({ page, request }) => {
-    await control(request, 'agent/script', {
-        prompt: 'production bundle',
-        events: answerEvents('Static export response'),
-        automatic: false,
-    });
+test('PROD-WEB-001 static export authenticates and completes an AG-UI turn', async ({ page, request }) => {
+    await control(request, 'a2a/script', { prompt: 'production bundle', response: 'Static export response' });
     await login(page);
     await send(page, 'production bundle');
-    await ready(request);
-    const id = (await state(request)).agent.sessions[0].id as string;
-    await control(request, 'agent/advance', { session_id: id });
+    await expect.poll(async () => (await state(request)).database.agent_tasks.length).toBe(1);
+    await expect.poll(async () => { await drain(request); return (await state(request)).a2a.create_calls; }).toBe(1);
     await expect(page.locator('.assistant-message')).toContainText('Static export response');
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible();
-    await drain(request);
+    const current = await state(request);
+    expect(current.a2a.create_calls).toBe(1);
 });
 
-test('PROD-WEB-002 static export hydrates an existing cross-surface session', async ({ page, request }) => {
-    const id = await slackTurn(request, 'existing session', 'Hydrated static response');
-    await login(page, id);
-    await expect(page).toHaveURL(new RegExp(`\\?session=${id}$`));
+test('PROD-WEB-002 static export restores A2A history from a thread link', async ({ page, request }) => {
+    await control(request, 'a2a/script', { prompt: 'existing thread', response: 'Hydrated static response' });
+    await login(page);
+    await send(page, 'existing thread');
+    await expect.poll(async () => (await state(request)).database.agent_tasks.length).toBe(1);
+    await expect.poll(async () => { await drain(request); return (await state(request)).a2a.create_calls; }).toBe(1);
     await expect(page.locator('.assistant-message')).toContainText('Hydrated static response');
-    await expect(page.getByRole('button', { name: 'Copy session link' })).toBeVisible();
+    const threadId = (await state(request)).database.agent_threads[0].thread_id as string;
+    await page.goto(`/?thread=${threadId}`);
+    await expect(page).toHaveURL(new RegExp(`thread=${threadId}`));
+    await expect(page.locator('.assistant-message')).toContainText('Hydrated static response');
+    await expect(page.getByRole('button', { name: 'Copy conversation link' })).toBeVisible();
 });
 
 test('PROD-WEB-003 static assets and query navigation do not depend on Next development mode', async ({ page }) => {
     const requests: string[] = [];
     page.on('request', request => requests.push(request.url()));
-    const response = await page.goto('/?session=sesn_missing');
+    const response = await page.goto('/?thread=00000000-0000-4000-8000-000000000999');
     expect(response?.status()).toBe(200);
     await expect(page.locator('input[type=password]')).toBeVisible();
     const assets = await page.locator('script[src], link[rel="stylesheet"]').evaluateAll(elements =>

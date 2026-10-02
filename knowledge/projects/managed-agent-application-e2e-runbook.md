@@ -1,7 +1,7 @@
 ---
 type: Runbook
 title: "Managed Agent Application End-to-End Runbook"
-description: "Deploy and verify the repository's web-to-Claude and Slack-to-Claude-to-Slack paths."
+description: "Deploy and verify Web and Slack through the shared application thread and private A2A controller."
 tags:
   - managed-agents
   - slack
@@ -32,165 +32,76 @@ generated:
 
 ## Objective
 
-Prove that the deployed system preserves one authorization model and the canonical Managed Agent transcript across two surfaces:
+Prove that Web and Slack continue one authorized application thread and A2A context:
 
 ```text
-Browser → Web API → Managed Agent → SSE → Browser
-Slack → signed HTTP ingress → DSQL authorization → Managed Agent
-Managed Agent → signed webhook → EventBridge → Slack projector → Slack thread
+Web → AG-UI bridge → ThreadAgentService → private A2A controller → CMA
+Slack ingress → ThreadAgentService → private A2A controller → CMA
+CMA webhook → controller scheduler → A2A push → application event sink → Slack projector
 ```
 
-DSQL stores authorization and routing metadata only.
+DSQL contains application identity, routing, idempotency, projection, and controller metadata only. Provider sessions and canonical content stay behind the controller.
 
-## Preconditions
+## Preconditions and local gate
 
-- AWS SSO profile is selected through `AWS_PROFILE`; STS resolves the target
-  account and optional `EXPECTED_AWS_ACCOUNT_ID` asserts it.
-- Deployment uses the supported `AWS_REGION` (default `us-west-2`).
-- `.env` contains the required Anthropic, Slack, and web secrets without committing them.
-- The Managed Agent and environment exist.
-- The Slack app is installed or reinstalled from the generated Slack manifest in a
-  Developer Program sandbox.
-- Slack Socket Mode is disabled.
-- Slack Event Subscriptions use the Terraform `slack_events_url` and include `app_mention`.
-- The Anthropic webhook uses the Terraform `anthropic_webhook_url` and its signing key has been synced.
+- `AWS_PROFILE` selects the intended account; verify it with STS. Region defaults to `us-west-2`.
+- Required Anthropic, Slack, and Web secrets stay in untracked `.env`.
+- The Slack app is installed from the generated manifest with Socket Mode disabled, and a human Slack identity is mapped in DSQL.
+- Terraform outputs supply the public URLs and DSQL endpoint; the Anthropic webhook signing key has been synced.
+- Run `./scripts/verify --fast` during development and `./scripts/verify --full` before deployment. The full gate includes PostgreSQL, semantic Playwright, artifact, and Terraform checks.
 
-## Local validation
-
-Run before changing AWS:
+## Credentials and deployment
 
 ```bash
-npm run lint
-npm run typecheck
-npm test
-npm run build
-npm run terraform:validate
-```
-
-Do not deploy when any check fails. Packaging may require execution outside a restrictive local sandbox because the TypeScript runner creates an IPC socket.
-
-## AWS credentials
-
-```bash
-aws sso login --profile default
 aws sts get-caller-identity --profile default
-```
-
-Confirm the discovered account is the intended target (and matches
-`EXPECTED_AWS_ACCOUNT_ID` when configured). For direct Terraform or SDK commands,
-export concrete credentials so they use the same SSO session:
-
-```bash
-export AWS_PROFILE=default
-export AWS_SDK_LOAD_CONFIG=1
-export AWS_REGION=us-west-2
-export AWS_DEFAULT_REGION=us-west-2
+export AWS_PROFILE=default AWS_SDK_LOAD_CONFIG=1 AWS_REGION=us-west-2 AWS_DEFAULT_REGION=us-west-2
 eval "$(aws configure export-credentials --profile default --format env)"
+./scripts/deploy.sh --plan-only
 ```
 
-Never print the exported values.
+Confirm the discovered account is intended and inspect every Terraform delete or replacement before running `./scripts/deploy.sh`. The wrapper applies Terraform, syncs secrets, migrates and seeds DSQL, uploads Web assets, and invalidates CloudFront. Never print exported credentials. Migration 008 intentionally drops the six legacy session-era tables; verify only those tables are removed and current thread/controller state remains.
 
-## Deploy
+## Callbacks and identity
 
-Use the wrapper:
+- Use Terraform's `slack_events_url`, `slack_interactions_url`, and `anthropic_webhook_url`. Keep Slack Socket Mode disabled and reinstall after scope changes.
+- Subscribe the Anthropic webhook to `session.status_idled`, `session.status_terminated`, and `session.budget_reached`. The controller may also wake on `session.status_rescheduled`.
+- Map a verified human Slack identity observed in a signed event:
 
-```bash
-./scripts/deploy.sh
-```
+  ```bash
+  export DSQL_ENDPOINT="$(terraform -chdir=infra/app output -raw dsql_endpoint)"
+  npm run db:map-slack -- --team-id T01234567 --user-id U01234567
+  ```
 
-It validates the account, builds the application, initializes remote state, applies Terraform, syncs secrets, migrates/seeds DSQL, uploads static assets, and invalidates CloudFront.
+Optional Slack allowlists are traffic filters, not authentication.
 
-Review the Terraform plan before accepting unexpected replacement or deletion. A Lambda-only code update should normally show an in-place update.
+## Web and Slack acceptance
 
-## Configure callbacks
+1. Sign in to Web with the access token, create an application thread, send a basic turn, and confirm one A2A Task and a final response.
+2. Reload during `WORKING`; verify canonical history and the same Task. Complete an approval after reload, then Stop a separate Task during `INPUT_REQUIRED`.
+3. From the mapped human Slack account, send an app mention and a bound-thread reply. Confirm one Task per input, exact-message receipt/source links, and completed projection.
+4. Allow, deny with reason, and Stop through Slack controls. A signed duplicate delivery must not create a second Task.
+5. Open the Slack-bound thread in Web with `?thread=<uuid>`; send a Web turn and confirm one Slack projection from the same A2A context.
+6. Verify private A2A rejects an outside-VPC request, relevant DLQs are empty, legacy tables are absent, and no surface payload contains a provider session ID.
 
-### Slack
-
-1. Disable Socket Mode.
-2. Enable Event Subscriptions.
-3. Set the verified Events Request URL from `terraform -chdir=infra/app output -raw slack_events_url`.
-4. Set the Interaction Request URL from `terraform -chdir=infra/app output -raw slack_interactions_url`.
-5. Render the Slack manifest with `npm run slack:manifest`, import it, and invite
-   the app to the public/private test channels.
-
-### Anthropic
-
-1. Open **Manage → Webhooks** in the Claude Console.
-2. Add the Terraform `anthropic_webhook_url`.
-3. Subscribe to the configured session status events.
-4. Store the one-time signing key in local `.env` as `ANTHROPIC_WEBHOOK_SIGNING_KEY`.
-5. Run `npm run secrets:sync` with concrete AWS credentials.
-
-## Bootstrap Slack identity safely
-
-1. Have the human user mention the bot in a channel.
-2. Confirm `slack-ingress` logs `slack_event_accepted`.
-3. Confirm `agent-input` logs `slack_identity_unmapped` with signed `team_id` and `user_id`.
-4. Set the DSQL endpoint from Terraform.
-5. Map the verified pair:
-
-   ```bash
-   export DSQL_ENDPOINT="$(terraform -chdir=infra/app output -raw dsql_endpoint)"
-   npm run db:map-slack -- --team-id T01234567 --user-id U01234567
-   ```
-
-6. Ask the user to send a new mention. Do not replay the completed unmapped event.
-
-Do not add the IDs to `.env` unless a temporary development traffic filter is explicitly desired.
-
-## Web smoke test
-
-Use the web access token to establish a signed cookie, then:
-
-1. Create a session with a unique client request UUID.
-2. Send `Reply with exactly: managed-agent-smoke-ok` with another UUID.
-3. Read the session events.
-4. Verify running status, user message, agent message, usage, and idle status.
-5. Verify the exact response text.
-6. Verify `anthropic-webhook` accepted a signed idle event for the same session.
-7. Archive the temporary session.
-
-Never print the access token or signed cookie.
-
-## Slack smoke test
-
-Send this from the mapped human identity in a channel containing the bot:
-
-```text
-@bot Reply with exactly: slack-smoke-ok
-```
-
-Success requires correlated evidence:
-
-1. `slack-ingress`: `slack_event_accepted`.
-2. `agent-input`: `slack_message_submitted` with the mapped principal and a session ID.
-3. `anthropic-webhook`: `anthropic_webhook_accepted` for that session.
-4. `slack-projector`: `slack_message_projected` for a Managed Agent event ID.
-5. The Slack thread contains `slack-smoke-ok`.
-6. Reading that session through the authorized web principal shows the same canonical agent message.
-
-Keep Slack smoke sessions unless the user asks to archive them; they demonstrate cross-surface continuation.
+Use `scripts/live_a2a_inspect.py` for thread, binding, Task, push, projection, and removed-table metadata. It never needs transcript content. The live Slack user smoke requires the configured human user token, channel, DSQL access, and concrete AWS credentials.
 
 ## Failure isolation
 
-Follow the path in order:
-
-| Symptom | First check |
+| Symptom | First boundary to inspect |
 | --- | --- |
-| Slack mention never reaches Lambda | Socket Mode, Event Subscriptions, Request URL, `app_mention` |
-| Ingress ignores the request | Envelope/event type, subtype, bot ID, required field presence |
-| Identity is unmapped | Signed team/user pair and DSQL external identity |
-| Agent input fails | DSQL role, session creation idempotency, Anthropic credentials |
-| No completion callback | Anthropic subscription, signing key, webhook Lambda logs |
-| No Slack response | Surface binding, projection receipt, bot scope, channel membership |
-| EventBridge delivery failure | Rule metrics and the standard SQS target DLQ |
-| Terraform works in CLI but Python fails | Concrete credentials and explicit AWS region |
+| Slack mention does not arrive | Socket Mode, signed HTTP Events Request URL, scope/event subscription |
+| Slack input is ignored | Verified team/user identity and existing thread ownership |
+| Task does not start | `agent-input`, application claim, private A2A admission, controller scheduler |
+| Task is held | Controller Task state and KL-003 operator procedure in [operations](../../docs/operations.md) |
+| Web stream closes early | `GetTask` and KL-004 recovery, then re-subscribe |
+| Slack output missing | A2A push receipt, EventBridge target, projection claim, Slack API result |
+| Web or Slack Stop stalls | Controller cancel request, scheduler reconcile, provider interrupt evidence |
 
-EventBridge target DLQ messages include rule, target, retry, and error metadata. Inspect without deleting first; resolve the cause before replaying. Preserve idempotency keys during any replay.
+Inspect DLQ messages without deleting them; resolve the first broken boundary before redrive and preserve the same logical IDs.
 
-## Current verified result
+## Historical acceptance
 
-On 2026-09-02 local time, the deployed development environment completed both deterministic tests. The Slack identity came from signed HTTP events and was mapped in DSQL; no Slack allowlist value was used as authentication.
+The 2026-09-02 acceptance established signed Slack HTTP delivery and DSQL identity mapping for the earlier direct-CMA architecture. Later Phase 4 and Phase 5 acceptance established private A2A and AG-UI paths. The 2026-09-28 Phase 6 acceptance is recorded in the [final cutover feature contract](../../docs/feature-contract-final-cutover.md): migration `008`, mapped-human Slack, Web/Slack approval and Stop, cross-surface races, private A2A access denial, IAM, and empty DLQs passed.
 
 ## Related knowledge
 

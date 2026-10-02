@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
 from managed_agents_app.config import load_config
-from managed_agents_app.handlers.agent_input import handle_domain_event
+from managed_agents_app.handlers.agent_input import handle_domain_event_async
 from managed_agents_app.logging import log
 from managed_agents_app.runtime import Runtime, get_runtime
 
 
-def handle_sqs_event(runtime: Runtime, event: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
+async def handle_sqs_event_async(runtime: Runtime, event: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
     records = event.get("Records")
     if not isinstance(records, list):
         raise ValueError("SQS event must contain a Records list")
@@ -34,7 +35,7 @@ def handle_sqs_event(runtime: Runtime, event: dict[str, Any]) -> dict[str, list[
                 raise ValueError("SQS record body must decode to an event object")
             raw_detail_type = domain_event.get("detail-type")
             detail_type = raw_detail_type if isinstance(raw_detail_type, str) else None
-            handle_domain_event(runtime, domain_event)
+            await handle_domain_event_async(runtime, domain_event)
             log(
                 "info",
                 "sqs_agent_input_processed",
@@ -55,6 +56,10 @@ def handle_sqs_event(runtime: Runtime, event: dict[str, Any]) -> dict[str, list[
                 error=type(error).__name__,
             )
     return {"batchItemFailures": failures}
+
+
+def handle_sqs_event(runtime: Runtime, event: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
+    return asyncio.run(handle_sqs_event_async(runtime, event))
 
 
 def handler(event: dict[str, Any], _context: Any) -> dict[str, list[dict[str, str]]]:

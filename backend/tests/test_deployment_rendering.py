@@ -24,14 +24,15 @@ def test_backend_rendering_is_portable_and_deterministic() -> None:
 
     assert 'bucket       = "123456789012-example-app-terraform-state-us-west-2"' in content
     assert 'key          = "example-app/dev/terraform.tfstate"' in content
+    assert "339543" not in content
 
 
 def test_default_state_bucket_for_real_app_name_is_s3_valid() -> None:
     renderer = load_script("render_terraform_backend.py")
 
-    bucket = renderer.state_bucket_name("123456789012", "managed-agent-web-slack", "us-west-2")
+    bucket = renderer.state_bucket_name("123456789012", "claude-managed-agents-ui-eda", "us-west-2")
 
-    assert len(bucket) <= 63
+    assert len(bucket) == 63
     assert re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", bucket)
     assert bucket.endswith("-terraform-state-us-west-2")
 
@@ -62,7 +63,7 @@ def test_state_bucket_override_is_preserved() -> None:
 
     assert (
         renderer.state_bucket_name(
-            "123456789012", "managed-agent-web-slack", "us-west-2", "existing-state-bucket"
+            "123456789012", "claude-managed-agents-ui-eda", "us-west-2", "existing-state-bucket"
         )
         == "existing-state-bucket"
     )

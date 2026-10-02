@@ -1,66 +1,61 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
-from managed_agents_app.db import IngressClaim
 from managed_agents_app.handlers import web_api
-from managed_agents_app.managed_agent import SessionSummary
 
-CONTRACTS = json.loads((Path(__file__).parent / "fixtures" / "contracts.json").read_text())
-
-
-class FakeDatabase:
-    def list_sessions(self, _principal_id):
-        return [{"session_id": "sesn_1"}]
-
-    def owns_session(self, _principal_id, session_id):
-        return session_id == "sesn_1"
-
-    def claim_ingress(self, _surface, _request_id):
-        return IngressClaim.ACQUIRED
-
-    def complete_ingress(self, *_args):
-        return None
-
-    def fail_ingress(self, *_args):
-        return None
-
-    def register_session(self, *_args):
-        return None
-
-    def mark_session_archived(self, *_args):
-        return None
+THREAD_ID = "03cb1122-146c-4dab-8393-1573ee38e195"
+REQUEST_ID = "cc7866ba-5859-4cf0-9748-7c603339544d"
 
 
-class FakeManaged:
+class FakeThreads:
     def __init__(self) -> None:
-        self.session = SessionSummary.model_validate(CONTRACTS["session"])
-        self.confirmations = []
+        self.rows: dict[str, dict] = {}
+        self.by_request: dict[str, str] = {}
 
-    def retrieve_session(self, _session_id):
-        return self.session
+    def create_thread_idempotent(self, principal: str, agent: str, request: str, title: str | None):
+        if request in self.by_request:
+            return self.rows[self.by_request[request]]
+        now = datetime(2026, 9, 27, tzinfo=UTC)
+        row = {
+            "thread_id": THREAD_ID,
+            "principal_id": principal,
+            "agent_id": agent,
+            "title": title,
+            "created_at": now,
+            "updated_at": now,
+            "archived_at": None,
+            "last_task_id": None,
+            "last_task_state": None,
+        }
+        self.rows[THREAD_ID] = row
+        self.by_request[request] = THREAD_ID
+        return row
 
-    def find_by_creation_request_id(self, _request_id):
-        return self.session
+    def list_threads(self, principal: str):
+        return [
+            row
+            for row in self.rows.values()
+            if row["principal_id"] == principal and row["archived_at"] is None
+        ]
 
-    def list_events(self, _session_id):
-        return [CONTRACTS["managed_event"]]
+    def get_owned_thread(self, principal: str, thread_id: str):
+        row = self.rows.get(thread_id)
+        return row if row and row["principal_id"] == principal else None
 
-    def send_message(self, *_args):
-        return "evt_input"
+    def archive_thread(self, principal: str, thread_id: str):
+        row = self.get_owned_thread(principal, thread_id)
+        if row:
+            row["archived_at"] = datetime(2026, 9, 27, tzinfo=UTC)
+        return row
 
-    def confirm_tool(self, *_args):
-        self.confirmations.append(_args)
-
-    def interrupt(self, *_args):
-        return None
-
-    def archive(self, *_args):
-        return None
-
-    def update_title(self, *_args):
-        return None
+    def restore_thread(self, principal: str, thread_id: str):
+        row = self.get_owned_thread(principal, thread_id)
+        if row:
+            row["archived_at"] = None
+        return row
 
 
 def request(method: str, path: str, body: object | None = None) -> dict:
@@ -76,77 +71,36 @@ def decoded(result: dict) -> dict:
     return json.loads(result["body"])
 
 
-def test_public_contracts(monkeypatch, config) -> None:
-    monkeypatch.setattr(web_api, "load_config", lambda: config)
-    health = web_api.handler(request("GET", "/health"), None)
-    assert health["statusCode"] == CONTRACTS["health"]["statusCode"]
-    assert decoded(health) == CONTRACTS["health"]["body"]
+def test_thread_metadata_api_and_removed_session_routes(monkeypatch, config) -> None:
+    threads = FakeThreads()
+    runtime = SimpleNamespace(config=config, threads=threads)
+    monkeypatch.setattr(web_api, "principal_from_cookie", lambda *_: "principal-1")
 
-    monkeypatch.setattr(web_api, "_authenticate", lambda *_: None)
-    denied = web_api.handler(request("GET", "/api/sessions"), None)
-    assert denied["statusCode"] == CONTRACTS["unauthorized"]["statusCode"]
-    assert decoded(denied) == CONTRACTS["unauthorized"]["body"]
+    body = {"clientRequestId": REQUEST_ID}
+    created = web_api.handle_request(runtime, request("POST", "/api/threads", body))
+    assert created["statusCode"] == 201
+    assert decoded(created)["id"] == THREAD_ID
+    assert decoded(created)["agentId"] == "cma"
+    retried = web_api.handle_request(runtime, request("POST", "/api/threads", body))
+    assert decoded(retried)["id"] == THREAD_ID
+    assert len(threads.rows) == 1
+    listed = web_api.handle_request(runtime, request("GET", "/api/threads"))
+    assert [item["id"] for item in decoded(listed)["data"]] == [THREAD_ID]
+    assert web_api.handle_request(runtime, request("GET", f"/api/threads/{THREAD_ID}"))["statusCode"] == 200
+    archived = web_api.handle_request(runtime, request("POST", f"/api/threads/{THREAD_ID}/archive"))
+    assert decoded(archived)["archivedAt"] is not None
+    assert decoded(web_api.handle_request(runtime, request("GET", "/api/threads")))["data"] == []
+    restored = web_api.handle_request(runtime, request("POST", f"/api/threads/{THREAD_ID}/restore"))
+    assert decoded(restored)["archivedAt"] is None
+    assert web_api.handle_request(runtime, request("GET", "/api/sessions"))["statusCode"] == 404
 
 
-def test_session_rest_contracts(monkeypatch, config) -> None:
-    fake_db = FakeDatabase()
-    fake_managed = FakeManaged()
-    monkeypatch.setattr(web_api, "load_config", lambda: config)
-    monkeypatch.setattr(
-        web_api,
-        "_authenticate",
-        lambda *_: ("principal-1", fake_db, fake_managed),
-    )
-
-    listed = web_api.handler(request("GET", "/api/sessions"), None)
-    assert listed["statusCode"] == 200
-    assert decoded(listed) == {"data": [CONTRACTS["session"]]}
-
-    fetched = web_api.handler(request("GET", "/api/sessions/sesn_1"), None)
-    assert fetched["statusCode"] == 200 and decoded(fetched) == CONTRACTS["session"]
-
-    events = web_api.handler(request("GET", "/api/sessions/sesn_1/events"), None)
-    assert decoded(events) == {"data": [CONTRACTS["managed_event"]]}
-
-    message = web_api.handler(
-        request(
-            "POST",
-            "/api/sessions/sesn_1/messages",
-            {"clientRequestId": "5ae39557-b341-4dff-818b-751857e95ae3", "text": "hello"},
-        ),
-        None,
-    )
-    assert message["statusCode"] == 202
-    assert decoded(message) == {"ok": True, "managedEventId": "evt_input"}
-
-    fake_managed.list_events = lambda _session_id: [
-        {"id": "tool_1", "type": "agent.tool_use", "name": "bash", "input": {}},
-        {
-            "id": "idle_1",
-            "type": "session.status_idle",
-            "stop_reason": {"type": "requires_action", "event_ids": ["tool_1"]},
-        },
-    ]
-    confirm = web_api.handler(
-        request(
-            "POST",
-            "/api/sessions/sesn_1/confirm",
-            {"toolUseId": "tool_1", "approved": True},
-        ),
-        None,
-    )
-    assert confirm["statusCode"] == 202 and decoded(confirm) == {"ok": True}
-    assert fake_managed.confirmations[-1] == ("sesn_1", "tool_1", True, None)
-
-    stale = web_api.handler(
-        request(
-            "POST",
-            "/api/sessions/sesn_1/confirm",
-            {"toolUseId": "tool_missing", "approved": True},
-        ),
-        None,
-    )
-    assert stale["statusCode"] == 409
-    assert decoded(stale) == {"error": "tool approval is no longer pending"}
-    assert web_api.handler(request("POST", "/api/sessions/sesn_1/interrupt", {}), None)["statusCode"] == 202
-    assert web_api.handler(request("POST", "/api/sessions/sesn_1/archive", {}), None)["statusCode"] == 200
+def test_thread_ownership_is_not_disclosed(monkeypatch, config) -> None:
+    threads = FakeThreads()
+    threads.create_thread_idempotent("principal-1", config.agent_id, REQUEST_ID, None)
+    runtime = SimpleNamespace(config=config, threads=threads)
+    monkeypatch.setattr(web_api, "principal_from_cookie", lambda *_: "principal-2")
+    result = web_api.handle_request(runtime, request("GET", f"/api/threads/{THREAD_ID}"))
+    assert result["statusCode"] == 404
+    monkeypatch.setattr(web_api, "principal_from_cookie", lambda *_: None)
+    assert web_api.handle_request(runtime, request("GET", "/api/threads"))["statusCode"] == 401

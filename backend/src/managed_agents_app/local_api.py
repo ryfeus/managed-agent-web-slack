@@ -7,7 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
-from managed_agents_app.handlers import anthropic_webhook, slack_ingress, web_api, web_stream
+from managed_agents_app.agui_bridge.app import create_app as create_agui_app
+from managed_agents_app.cma_controller import webhook as anthropic_webhook
+from managed_agents_app.handlers import slack_ingress, web_api
 from managed_agents_app.runtime import Runtime, get_runtime
 
 
@@ -25,10 +27,7 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
         from managed_agents_app.testing.api import router
 
         app.include_router(router(runtime))
-
-    @app.get("/api/sessions/{session_id}/stream", response_model=None)
-    def stream(session_id: str, request: Request) -> Any:
-        return web_stream.stream_session(session_id, request, runtime)
+    app.include_router(create_agui_app(runtime).router)
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "DELETE", "OPTIONS"])
     async def buffered_api(path: str, request: Request) -> Response:
@@ -40,20 +39,12 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
             "body": body.decode(),
             "isBase64Encoded": False,
         }
-        handler = (
-            slack_ingress.handle_request
-            if path == "slack/events"
-            else anthropic_webhook.handle_request
-            if path == "anthropic/webhook"
-            else web_api.handle_request
-        )
-        result = await run_in_threadpool(handler, runtime, event)
-        if runtime.config.app_env == "e2e":
-            from typing import cast
-
-            from managed_agents_app.testing.fake_agent import FakeManagedAgent
-
-            cast(FakeManagedAgent, runtime.agent).flush_notifications()
+        if path == "slack/events":
+            result = await run_in_threadpool(slack_ingress.handle_request, runtime, event)
+        elif path == "anthropic/webhook":
+            result = await run_in_threadpool(anthropic_webhook.handle_request, runtime.config, event)
+        else:
+            result = await run_in_threadpool(web_api.handle_request, runtime, event)
         return Response(
             content=result["body"],
             status_code=result["statusCode"],

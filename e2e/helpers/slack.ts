@@ -1,6 +1,6 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { expect, type APIRequestContext } from '@playwright/test';
-import { backend, control, state, ready, answerEvents } from './api';
+import { backend, control, state, drain } from './api';
 export function mention(text: string, overrides: Record<string, unknown> = {}, eventId: string = randomUUID()) {
     return { type: 'event_callback', team_id: 'T001', event_id: eventId,
         event: { type: 'app_mention', user: 'U001', channel: 'C001', ts: '100.000001', text: `<@BOT> ${text}`, ...overrides } };
@@ -16,24 +16,19 @@ export async function inject(api: APIRequestContext, payload: object, interactio
     expect(response.status()).toBe(valid ? 200 : 401);
 }
 export async function slackTurn(api: APIRequestContext, prompt = 'hello', answer = 'Hello from Claude', overrides = {}) {
-    const events = answerEvents(answer).map(e => ({ ...e, ...(e.id ? { id: `${prompt}_final` } : {}),
-        ...(e.event ? { event: { ...e.event, id: `${prompt}_final` } } : {}), ...(e.event_id ? { event_id: `${prompt}_final` } : {}) }));
-    await control(api, 'agent/script', { prompt, events, automatic: false });
+    const events = [
+        { type: 'agent.message', content: [{ type: 'text', text: answer }] },
+        { type: 'session.status_idle', stop_reason: { type: 'end_turn' } },
+    ];
+    await control(api, 'a2a/script', { prompt, events, automatic: true });
     await inject(api, mention(prompt, overrides));
-    const delivery = control(api, 'events/drain');
-    await ready(api);
-    const id = (await state(api)).agent.sessions[0].id as string;
-    await control(api, 'agent/advance', { session_id: id });
-    const result = await delivery;
-    expect(result.history.filter((e: {
-        status: string;
-    }) => e.status === 'failed')).toEqual([]);
-    return id;
+    await drain(api);
+    return (await state(api)).database.agent_threads[0].thread_id as string;
 }
-export function interaction(action: string, ts: string) {
+export function interaction(action: string, ts: string, value: string) {
     return { type: 'block_actions', team: { id: 'T001' }, user: { id: 'U001' }, channel: { id: 'C001' },
         trigger_id: 'trigger_e2e', message: { ts, thread_ts: '100.000001' },
-        actions: [{ action_id: action, value: 'tool_1', action_ts: String(Date.now()) }] };
+        actions: [{ action_id: action, value, action_ts: String(Date.now()) }] };
 }
 export async function completionWebhook(api: APIRequestContext, sessionId: string) {
     const id = `msg_${randomUUID()}`;

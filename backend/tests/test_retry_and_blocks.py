@@ -12,8 +12,8 @@ from managed_agents_app.slack.blocks import (
     denial_reason_modal,
     feedback_blocks,
     markdown_text_chunk,
-    session_unfurl,
     source_link_blocks,
+    thread_unfurl,
     tool_approval_blocks,
     working_task_chunk,
 )
@@ -42,16 +42,16 @@ def test_serialization_retry_exhausts(monkeypatch) -> None:
 
 
 def test_slack_blocks_contain_only_metadata_and_controls() -> None:
-    approvals = tool_approval_blocks("tool_1", "browser", {"url": "https://example.test"})
+    approvals = tool_approval_blocks("task-1", "req-1", "browser", {"url": "https://example.test"})
     assert {item["action_id"] for item in approvals[1]["elements"]} == {
         "agent_tool_allow",
         "agent_tool_deny",
         "agent_tool_deny_with_reason",
     }
-    assert feedback_blocks("evt_1")[0]["block_id"] == "feedback:evt_1"
-    assert denial_reason_modal({"tool_use_id": "tool_1"})["callback_id"] == "agent_tool_deny_reason"
-    unfurl = session_unfurl("sesn_1", "Title", "idle", "https://example.test/?session=sesn_1")
-    assert unfurl["blocks"][1]["elements"][0]["action_id"] == "agent_link_session"
+    assert feedback_blocks("task-1", "message-1")[0]["block_id"] == "feedback:task-1:message-1"
+    assert denial_reason_modal({"request_id": "req-1"})["callback_id"] == "agent_tool_deny_reason"
+    unfurl = thread_unfurl("thread-1", "Title", "active", "https://example.test/?thread=thread-1")
+    assert unfurl["blocks"][1]["elements"][0]["action_id"] == "agent_link_thread"
     assert working_task_chunk("Ev1", "https://example.test/message")["sources"][0]["text"] == (
         "Original message"
     )

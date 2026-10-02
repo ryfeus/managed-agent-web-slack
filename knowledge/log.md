@@ -1,5 +1,21 @@
 # Knowledge Update Log
 
+## 2026-09-30
+
+- **Repository-managed CMA configuration**: Documented source definitions and
+  genuine lock ownership, exact session-version selection, explicit provider
+  previews, drift refusal, serialized apply, partial-failure lock retention, and
+  the environment's ID-based rollout/rollback caveat. The configuration feature
+  contract records passing fast/full verification, sandbox deployment, real
+  Slack continuation, and provider-reported exact version 1 for the newly created
+  application session. Original provider resources remain intact; two older
+  scheduler dead letters were left untouched.
+
+## 2026-09-28
+
+- **Final A2A provider boundary**: Updated Managed Agent operations and the application acceptance runbook to keep provider sessions, event reads, webhook wakeups, and ambiguous-send resolution behind the controller. Application threads and A2A Tasks are now the Web and Slack identities; the old direct-session projection procedure is retired.
+- **Phase 6 acceptance**: Recorded the dev migration, live Web and mapped-human Slack checks, cross-surface approval and cancellation, private A2A denial, deployed IAM, and empty dead letter queues in the final feature contract and runbook.
+
 ## 2026-09-18
 
 - **Portable deployment and public-readiness rails**: Documented deployment-scoped

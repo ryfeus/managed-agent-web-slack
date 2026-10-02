@@ -11,6 +11,7 @@ def config() -> AppConfig:
         app_name="test-app",
         aws_region="us-west-2",
         agent_id="agent_test",
+        agent_version=7,
         environment_id="env_test",
         dsql_endpoint="example.dsql.us-west-2.on.aws",
         dsql_database="postgres",
@@ -32,7 +33,6 @@ def runtime(monkeypatch, config):
 
     from managed_agents_app.handlers import (
         agent_input,
-        anthropic_webhook,
         slack_ingress,
         slack_projector,
         web_api,
@@ -45,6 +45,6 @@ def runtime(monkeypatch, config):
         result.config = config
         return result
 
-    for module in [agent_input, slack_projector, slack_ingress, anthropic_webhook, web_api]:
+    for module in [agent_input, slack_projector, slack_ingress, web_api]:
         monkeypatch.setattr(module, "get_runtime", factory)
     return result

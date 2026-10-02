@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PYTHONDONTWRITEBYTECODE=1
 
 cd "$(dirname "$0")/.."
+
+warn_cma_lock_changes() {
+  if [[ -n "$(git status --porcelain --untracked-files=all -- cma/claude-lock.json 2>/dev/null)" ]]; then
+    echo "CMA lockfile changed. Review and commit cma/claude-lock.json so source control records the deployed agent version; retain updates after partial failures." >&2
+  fi
+}
+trap warn_cma_lock_changes EXIT
 
 plan_only=false
 if [[ $# -gt 0 ]]; then
@@ -23,9 +31,8 @@ set +a
 
 aws_profile_value="${AWS_PROFILE:-default}"
 aws_region_value="${AWS_REGION:-us-west-2}"
-app_name_value="${APP_NAME:-managed-agent-web-slack}"
+app_name_value="${APP_NAME:-claude-managed-agents-ui-eda}"
 environment_value="${DEPLOYMENT_ENVIRONMENT:-dev}"
-agent_id_value="${CLAUDE_AGENT_ID:-${AGENT_ID:-}}"
 export AWS_REGION="$aws_region_value"
 export AWS_DEFAULT_REGION="$AWS_REGION"
 export AWS_SDK_LOAD_CONFIG=1
@@ -40,11 +47,14 @@ require_value() {
 }
 
 validate_deployment_configuration() {
-  require_value "CLAUDE_AGENT_ID (AGENT_ID is a deprecated alias)" "$agent_id_value"
-  require_value "CLAUDE_ENVIRONMENT_ID" "${CLAUDE_ENVIRONMENT_ID:-}"
   require_value "ANTHROPIC_API_KEY" "${ANTHROPIC_API_KEY:-}"
   require_value "WEB_ACCESS_TOKEN" "${WEB_ACCESS_TOKEN:-}"
   require_value "WEB_COOKIE_SECRET" "${WEB_COOKIE_SECRET:-}"
+  if [[ -n "${SLACK_USER_BOT_ID:-}" && -z "${SLACK_USER_APP_ID:-}" ]] || \
+     [[ -z "${SLACK_USER_BOT_ID:-}" && -n "${SLACK_USER_APP_ID:-}" ]]; then
+    echo "SLACK_USER_BOT_ID and SLACK_USER_APP_ID must be configured together." >&2
+    return 1
+  fi
 }
 
 discover_aws_account() {
@@ -105,10 +115,13 @@ configure_terraform_inputs() {
   export TF_VAR_app_name="$app_name_value"
   export TF_VAR_environment="$environment_value"
   export TF_VAR_aws_region="$aws_region_value"
-  export TF_VAR_claude_agent_id="$agent_id_value"
-  export TF_VAR_claude_environment_id="${CLAUDE_ENVIRONMENT_ID:-}"
+  export TF_VAR_claude_agent_id="$CLAUDE_AGENT_ID"
+  export TF_VAR_claude_agent_version="$CLAUDE_AGENT_VERSION"
+  export TF_VAR_claude_environment_id="$CLAUDE_ENVIRONMENT_ID"
   export TF_VAR_slack_team_allowlist="${SLACK_TEAM_ID:-}"
   export TF_VAR_slack_user_allowlist="${SLACK_USER_ID:-}"
+  export TF_VAR_slack_user_bot_id="${SLACK_USER_BOT_ID:-}"
+  export TF_VAR_slack_user_app_id="${SLACK_USER_APP_ID:-}"
   export TF_VAR_public_app_url="${PUBLIC_APP_URL:-$existing_url}"
   export TF_VAR_slack_bound_thread_replies_enabled="${SLACK_BOUND_THREAD_REPLIES:-false}"
   export TF_VAR_slack_agent_view_enabled="${SLACK_AGENT_VIEW_ENABLED:-false}"
@@ -127,7 +140,8 @@ configure_terraform_inputs() {
 build_and_plan() {
   npm run lint
   npm run typecheck
-  npm test
+  npm run test:web
+  UV_CACHE_DIR=.uv-cache uv run --directory backend pytest --ignore=tests/integration
   npm run build:web
   ./scripts/build_python_lambdas.sh
 
@@ -138,22 +152,7 @@ build_and_plan() {
 
 block_destructive_core_changes() {
   local destructive
-  destructive="$(terraform -chdir=infra/app show -json ../../dist/application.tfplan | jq -r '
-    .resource_changes[]?
-    | select((.change.actions | index("delete")) != null)
-    | select(
-        (.type | startswith("aws_dsql_"))
-        or (.type | startswith("aws_s3_"))
-        or (.type | startswith("aws_cloudfront_"))
-        or (.type | startswith("aws_api_gateway_"))
-        or (.type | startswith("aws_lambda_"))
-        or (.type | startswith("aws_sqs_"))
-        or (.type | startswith("aws_cloudwatch_event_"))
-        or (.type | startswith("aws_secretsmanager_"))
-        or (.type | startswith("aws_iam_"))
-      )
-    | "\(.type).\(.name): \(.change.actions | join(" -> "))"
-  ')"
+  destructive="$(terraform -chdir=infra/app show -json ../../dist/application.tfplan | jq -r -f scripts/deploy_guard.jq)"
   if [[ -n "$destructive" ]]; then
     echo "Refusing a plan with destructive core infrastructure changes:" >&2
     echo "$destructive" >&2
@@ -181,6 +180,7 @@ deploy_application() {
 }
 
 validate_deployment_configuration
+python3 scripts/cma_lock.py validate
 account_id="$(discover_aws_account)"
 render_backend_configuration "$account_id"
 if [[ "$plan_only" == true ]]; then
@@ -190,6 +190,13 @@ else
 fi
 eval "$(aws configure export-credentials --profile "$aws_profile_value" --format env)"
 unset AWS_PROFILE AWS_DEFAULT_PROFILE
+if [[ "$plan_only" == true ]]; then
+  echo "CMA resources are not mutated in --plan-only mode. Run npm run cma:plan separately; AWS planning uses the current lock version."
+else
+  ./scripts/cma.sh apply
+fi
+CMA_REPOSITORY_ROOT="$PWD"
+source scripts/cma_env.sh
 if [[ "$plan_only" == true ]]; then
   require_state_bucket
 else

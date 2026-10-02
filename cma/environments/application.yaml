@@ -1,0 +1,5 @@
+# yaml-language-server: $schema=https://platform.claude.com/schemas/ant/beta/environment.json
+name: "structured-extractor-env"
+config: {"networking": {"type": "unrestricted"}, "packages": {"apt": [], "cargo": [], "gem": [], "go": [], "npm": [], "pip": [], "type": "packages"}, "type": "cloud"}
+metadata: {}
+scope: "organization"

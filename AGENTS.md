@@ -2,19 +2,23 @@
 
 ## Purpose and invariant
 
-This repository implements a serverless web and Slack interface for Anthropic Managed Agents. A user can continue the same Claude session from the assistant-ui web application or from a Slack thread.
+This repository implements a serverless web and Slack interface for Anthropic Managed Agents. Web and Slack continue the same application thread through controller-owned A2A Tasks. CMA provider session identity stays private to the controller.
 
 Preserve this architectural invariant:
 
-> Anthropic owns conversation transcripts and execution state. Aurora DSQL stores only identity, authorization, session ownership, surface routing, idempotency, and projection state.
+> Web and Slack operate on application threads and A2A Tasks. CMA/Anthropic owns canonical transcripts and execution behind the controller. Aurora DSQL stores only identity, authorization, routing, idempotency, projection state, and opaque temporary-object keys.
 
 Do not add Claude messages, tool calls, reasoning, or transcript copies to DSQL.
 
 ## Repository map
 
 - `apps/web`: statically exported Next.js/assistant-ui frontend.
-- `apps/web/lib/managed-agent-reducer.ts`: browser-only Managed Agent event reducer.
-- `backend/src/managed_agents_app`: Python 3.14 backend shared code and all six Lambda handlers.
+- `apps/web/app/assistant.tsx`: assistant-ui AG-UI runtime and thread interface.
+- `backend/src/managed_agents_app/agui_bridge`: public cookie-authenticated AG-UI to private A2A bridge.
+- `backend/src/managed_agents_app/agent_control_plane`: application threads, A2A Task binding, and FIFO active-Task selection.
+- `backend/src/managed_agents_app/a2a_client`: private controller client.
+- `backend/src/managed_agents_app/cma_controller`: controller-private CMA session and execution adapter.
+- `backend/src/managed_agents_app`: Python 3.14 backend shared code and Lambda handlers.
 - `backend/migrations`: language-neutral DSQL schema migrations.
 - `backend/tests`: pytest unit and contract coverage.
 - `slack/manifest.template.yaml`: deployment-independent Agent View, event, interactivity, shortcut, and unfurl template.
@@ -45,7 +49,8 @@ Treat Terraform outputs as authoritative for application URLs, callbacks, DSQL e
 
 - Local secrets are in `.env`; never print, commit, or copy their values into documentation or Terraform state.
 - `.env.example` documents supported variables.
-- Required deployment inputs include `CLAUDE_AGENT_ID`, `CLAUDE_ENVIRONMENT_ID`, the Anthropic API key, and web access/cookie secrets. `AGENT_ID` is only a compatibility alias.
+- Deployment inputs include the Anthropic API key and web access/cookie secrets. Agent ID, exact version, and environment ID come exclusively from `cma/claude-lock.json`; manual IDs and `AGENT_ID` do not select deployment configuration.
+- CMA definitions and genuine lock state are committed under `cma/`. Use `npm run cma:plan` before normal deployment, which applies them with ant >= 1.30.0. Never automatically force/prune or discard partial lock updates. Serialize applies and review/commit lock changes.
 - The Anthropic webhook signing key is created when the webhook is registered and then synced to Secrets Manager.
 - `npm run secrets:sync` invokes the Python operation and derives each Secrets Manager region from its Terraform ARN.
 
@@ -79,21 +84,21 @@ Treat Terraform outputs as authoritative for application URLs, callbacks, DSQL e
 - `SLACK_TASK_CARDS_ENABLED=true` requires `SLACK_STREAMING_ENABLED=true`. When streaming is disabled, log the invalid combination and fall back with task cards disabled.
 - Current sandbox gates are receipt reaction, source links, task cards, streaming, Agent View, tool approvals, feedback, shortcuts, active context, bound-thread replies, and unfurls. Defaults remain disabled in configuration examples so deployments opt in deliberately.
 
-## Managed Agent stream reconciliation
+## A2A Task reconciliation
 
-- A Managed Agent event subscription is not a replay mechanism. Fast turns can finish before the Slack projector subscribes, leaving a live subscription waiting even though the canonical session is already idle.
-- After creating the early Slack task card, list canonical session events before subscribing. If the current turn already has an agent message plus an idle/terminal status, render that final message without opening the live subscription.
-- After a stream error or timeout, list canonical events again. Use the retained final agent message or pending-tool state when available; retry only when the turn is still genuinely incomplete.
-- Break the live subscription as soon as the final `agent.message` arrives. A final message must be appended even when no text deltas were observed.
-- The completion webhook must defer while a valid live-stream lease exists. Recovery may finalize only a stream explicitly marked for fallback or one whose lease expired; otherwise the webhook can call `chat.stopStream` before live delta appends and cause `message_not_in_streaming_state`.
-- Record the final Managed Agent event-to-Slack timestamp receipt when the stream closes. Keep stream leases, cursors, IDs, attempts, and errors in DSQL, but never message bodies.
+- Web uses assistant-ui AG-UI through the public bridge; Slack uses `ThreadAgentService`. Both reach the private A2A controller. Browser code never receives CMA session IDs or provider events.
+- The active Task is the earliest nonterminal Task in controller FIFO order. History, resume, pending human input, and explicit Stop must select that same Task.
+- A Task subscription is not replay. Reconcile with canonical `GetTask` history before subscribing and after stream closure or failure; deduplicate by stable A2A message ID.
+- A browser reconnect loads A2A history, then compares the resume snapshot with that load. A newer snapshot must refresh the thread so an intervening message appears once. Reload or disconnect never cancels a Task.
+- Explicit Web Stop calls the bridge cancellation endpoint, which cancels the selected A2A Task and triggers controller-private provider cleanup, including while input is pending.
+- Keep Task bindings, push receipts, projection state, attempts, and opaque temporary-object keys in DSQL, never message bodies or tool output.
 
 ## Anthropic Managed Agent behavior
 
-- Load the agent ID and API credential from `.env`; do not hardcode them.
+- Only controller components receive lock-derived `CLAUDE_AGENT_ID`, `CLAUDE_AGENT_VERSION`, and `CLAUDE_ENVIRONMENT_ID`. Every new session pins `{type: agent, id, version}`; secrets remain outside Git. Environment selection is ID-based rather than version-pinned.
 - The deployed webhook subscribes to `session.status_idled`, `session.status_terminated`, and `session.budget_reached`.
-- Web and Slack surfaces are authorized against the same DSQL principal, allowing an explicitly linked Slack thread to continue a web-created session.
-- The application relies on Anthropic session/event APIs for transcript reads and streams.
+- Web and Slack surfaces are authorized against the same DSQL principal, allowing an explicitly linked Slack thread to continue an application conversation.
+- Only the CMA controller uses Anthropic session/event APIs for transcript reads, execution, and streams.
 
 ## Validation
 
@@ -112,6 +117,20 @@ Before declaring a change complete, run the authoritative local verifier:
 Individual npm, pytest, E2E, artifact, and Terraform commands remain available for
 focused debugging. `npm run e2e:live` is separate, credentialed, and never part of
 normal verification.
+
+## Local real-Slack smoke
+
+For changes affecting Slack ingress, routing, A2A Task creation, thread/context
+binding, Managed Agent execution, Slack projection, or related deployment
+infrastructure, run deterministic verification first. After deploying the
+current branch to the developer sandbox, run `npm run e2e:slack-user` when
+`SLACK_USER_TOKEN`, `E2E_LIVE_SLACK_CHANNEL_ID`, DSQL access, and concrete AWS
+credentials are configured. Correlate failures by run ID, Slack thread, DSQL
+metadata, and AWS logs, and identify the first observable broken boundary.
+User-token posts carrying Slack bot metadata require the deployed exact
+`SLACK_USER_BOT_ID` and `SLACK_USER_APP_ID` pair; the token itself stays local.
+Do not run it automatically for unrelated changes or substitute synthetic
+Slack ingress for this smoke.
 
 The fast verifier enforces closed-by-default rails before linting:
 
@@ -153,6 +172,17 @@ Before completion, run `./scripts/verify --full`, review the result against the
 feature contract, and ensure no known limitation was silently removed. Do not claim
 real-provider compatibility unless an existing live contract test proves it;
 otherwise state the remaining live verification requirement explicitly.
+
+The 2026-09-05 verification completed the following paths successfully:
+
+1. Signed channel `app_mention` with exact-message `:eyes:`, source link, and one completed task card.
+2. Unmentioned reply in the already-bound thread with its own exact-message receipt and source link.
+3. Top-level DM/Agent View session creation and completed native task response.
+4. Approval-gated `web_fetch`: suspended task, Allow interaction, control replacement, resumed execution, and final completion.
+5. Native `agent_session_stopped`: authorized Managed Agent `user.interrupt` and an interrupted tool result rather than successful execution.
+6. Invalid `chat.getPermalink` timestamp handled as a non-fatal missing source link.
+7. Chunk-mode recovery payload completed an existing task stream without posting a duplicate response.
+8. Full local validation passed with 51 Python tests and 4 frontend tests; both opt-in live DSQL/Anthropic integration tests passed; the EventBridge DLQ was empty after acceptance.
 
 When debugging, inspect the `slack-ingress`, `agent-input`, `anthropic-webhook`, and `slack-projector` Lambda log groups in that order. Ingress diagnostics intentionally log event metadata and field presence, never Slack message text.
 

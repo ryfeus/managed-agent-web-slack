@@ -16,6 +16,7 @@ export DSQL_ENDPOINT=
 export APP_ENV=e2e DATABASE_MODE=postgres PYTHONDONTWRITEBYTECODE=1
 export DATABASE_URL="postgresql://managed_agents:managed_agents@127.0.0.1:54321/managed_agents_e2e"
 export CLAUDE_AGENT_ID=agent_e2e CLAUDE_ENVIRONMENT_ID=env_e2e
+export CLAUDE_AGENT_VERSION=1
 export WEB_ACCESS_TOKEN=e2e-access-token WEB_COOKIE_SECRET=e2e-cookie-secret-at-least-32-bytes
 export DEV_PRINCIPAL_ID=00000000-0000-4000-8000-000000000001
 export PUBLIC_APP_URL=http://127.0.0.1:3000 NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:3001
@@ -32,6 +33,14 @@ artifacts="$PWD/test-results/production-web-services"
 mkdir -p "$artifacts"
 backend_pid= static_pid=
 compose_started=false
+stop_process_tree() {
+  local pid="$1" child
+  [[ -n "$pid" ]] || return
+  while read -r child; do
+    [[ -n "$child" ]] && stop_process_tree "$child"
+  done < <(pgrep -P "$pid" 2>/dev/null || true)
+  kill "$pid" 2>/dev/null || true
+}
 next_env_backup="$(mktemp)"
 cp apps/web/next-env.d.ts "$next_env_backup"
 
@@ -41,8 +50,8 @@ cleanup() {
   if [[ $result -ne 0 ]]; then
     curl --max-time 5 -fsS http://127.0.0.1:3001/_test/state > "$artifacts/state.json" 2>/dev/null || true
   fi
-  [[ -z "$static_pid" ]] || kill "$static_pid" 2>/dev/null || true
-  [[ -z "$backend_pid" ]] || kill "$backend_pid" 2>/dev/null || true
+  stop_process_tree "$static_pid"
+  stop_process_tree "$backend_pid"
   wait 2>/dev/null || true
   if [[ "$compose_started" == true ]]; then
     docker compose -f docker-compose.e2e.yml logs > "$artifacts/postgres.log" 2>&1 || true
@@ -78,7 +87,7 @@ docker info > /dev/null
 compose_started=true
 docker compose -f docker-compose.e2e.yml up -d --wait --wait-timeout 60 > "$artifacts/postgres-start.log" 2>&1
 uv run --directory backend python -m managed_agents_app.operations migrate > "$artifacts/migrations.log" 2>&1
-uv run --directory backend uvicorn managed_agents_app.local_api:app \
+backend/.venv/bin/python -m uvicorn managed_agents_app.local_api:app \
   --host 127.0.0.1 --port 3001 > "$artifacts/backend.log" 2>&1 &
 backend_pid=$!
 python3 -m http.server 3000 --bind 127.0.0.1 \

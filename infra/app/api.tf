@@ -32,38 +32,50 @@ resource "aws_api_gateway_integration" "api_proxy" {
   timeout_milliseconds    = 29000
 }
 
-resource "aws_api_gateway_resource" "sessions" {
+resource "aws_api_gateway_resource" "agui" {
   rest_api_id = aws_api_gateway_rest_api.app.id
   parent_id   = aws_api_gateway_resource.api.id
-  path_part   = "sessions"
+  path_part   = "agui"
 }
 
-resource "aws_api_gateway_resource" "session" {
+resource "aws_api_gateway_resource" "agui_proxy" {
   rest_api_id = aws_api_gateway_rest_api.app.id
-  parent_id   = aws_api_gateway_resource.sessions.id
-  path_part   = "{id}"
+  parent_id   = aws_api_gateway_resource.agui.id
+  path_part   = "{proxy+}"
 }
 
-resource "aws_api_gateway_resource" "stream" {
-  rest_api_id = aws_api_gateway_rest_api.app.id
-  parent_id   = aws_api_gateway_resource.session.id
-  path_part   = "stream"
-}
-
-resource "aws_api_gateway_method" "stream" {
+resource "aws_api_gateway_method" "agui" {
   rest_api_id   = aws_api_gateway_rest_api.app.id
-  resource_id   = aws_api_gateway_resource.stream.id
-  http_method   = "GET"
+  resource_id   = aws_api_gateway_resource.agui.id
+  http_method   = "POST"
   authorization = "NONE"
 }
 
-resource "aws_api_gateway_integration" "stream" {
+resource "aws_api_gateway_integration" "agui" {
   rest_api_id             = aws_api_gateway_rest_api.app.id
-  resource_id             = aws_api_gateway_resource.stream.id
-  http_method             = aws_api_gateway_method.stream.http_method
+  resource_id             = aws_api_gateway_resource.agui.id
+  http_method             = aws_api_gateway_method.agui.http_method
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
-  uri                     = aws_lambda_function.app["web-stream"].response_streaming_invoke_arn
+  uri                     = aws_lambda_function.app["agui-bridge"].response_streaming_invoke_arn
+  response_transfer_mode  = "STREAM"
+  timeout_milliseconds    = 900000
+}
+
+resource "aws_api_gateway_method" "agui_proxy" {
+  rest_api_id   = aws_api_gateway_rest_api.app.id
+  resource_id   = aws_api_gateway_resource.agui_proxy.id
+  http_method   = "ANY"
+  authorization = "NONE"
+}
+
+resource "aws_api_gateway_integration" "agui_proxy" {
+  rest_api_id             = aws_api_gateway_rest_api.app.id
+  resource_id             = aws_api_gateway_resource.agui_proxy.id
+  http_method             = aws_api_gateway_method.agui_proxy.http_method
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.app["agui-bridge"].response_streaming_invoke_arn
   response_transfer_mode  = "STREAM"
   timeout_milliseconds    = 900000
 }
@@ -147,7 +159,7 @@ resource "aws_api_gateway_integration" "anthropic_webhook" {
 }
 
 resource "aws_lambda_permission" "api_gateway" {
-  for_each      = toset(["web-api", "web-stream", "slack-ingress", "anthropic-webhook"])
+  for_each      = toset(["web-api", "agui-bridge", "slack-ingress", "anthropic-webhook"])
   statement_id  = "AllowApiGateway"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.app[each.key].function_name
@@ -160,7 +172,8 @@ resource "aws_api_gateway_deployment" "app" {
   triggers = {
     redeployment = sha1(jsonencode([
       aws_api_gateway_integration.api_proxy.id,
-      aws_api_gateway_integration.stream.id,
+      aws_api_gateway_integration.agui.id,
+      aws_api_gateway_integration.agui_proxy.id,
       aws_api_gateway_integration.slack_events.id,
       aws_api_gateway_integration.slack_interactions.id,
       aws_api_gateway_integration.anthropic_webhook.id

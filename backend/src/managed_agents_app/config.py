@@ -3,11 +3,11 @@ from __future__ import annotations
 import base64
 import os
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
 import boto3
 from botocore.exceptions import ClientError
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AppConfig(BaseModel):
@@ -20,6 +20,13 @@ class AppConfig(BaseModel):
     aws_region: str
     agent_id: str
     environment_id: str
+    agent_version: Annotated[int, Field(strict=True, gt=0)] | None = None
+    cma_a2a_endpoint: str = ""
+    a2a_event_sink_url: str = ""
+    cma_a2a_push_allowed_url: str = ""
+    cma_scheduler_queue_url: str = ""
+    cma_push_queue_url: str = ""
+    cma_pending_input_bucket: str = ""
     dsql_endpoint: str
     dsql_database: str
     dsql_role: str
@@ -33,6 +40,8 @@ class AppConfig(BaseModel):
     slack_bot_token: str | None = None
     slack_team_allowlist: str | None = None
     slack_user_allowlist: str | None = None
+    slack_user_bot_id: str | None = None
+    slack_user_app_id: str | None = None
     public_app_url: str = ""
     slack_bound_thread_replies: bool = False
     slack_agent_view_enabled: bool = False
@@ -53,6 +62,15 @@ def _flag(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.lower() in {"1", "true", "yes", "on"}
+
+
+def _agent_version() -> int | None:
+    value = os.getenv("CLAUDE_AGENT_VERSION")
+    if value is None:
+        return None
+    if not value.isascii() or not value.isdecimal() or int(value) < 1:
+        raise RuntimeError("CLAUDE_AGENT_VERSION must be a positive integer")
+    return int(value)
 
 
 @lru_cache(maxsize=16)
@@ -90,14 +108,21 @@ def load_config() -> AppConfig:
         app_env=os.getenv("APP_ENV", "development"),
         database_mode=os.getenv("DATABASE_MODE", "dsql"),
         database_url=os.getenv("DATABASE_URL", ""),
-        app_name=os.getenv("APP_NAME", "managed-agent-web-slack"),
+        app_name=os.getenv("APP_NAME", "claude-managed-agents-ui-eda"),
         aws_region=os.getenv("AWS_REGION", "us-west-2"),
-        agent_id=os.getenv("CLAUDE_AGENT_ID") or os.getenv("AGENT_ID", ""),
+        agent_id=os.getenv("CLAUDE_AGENT_ID", ""),
         environment_id=os.getenv("CLAUDE_ENVIRONMENT_ID", ""),
+        agent_version=_agent_version(),
+        cma_a2a_endpoint=os.getenv("CMA_A2A_ENDPOINT", "").strip(),
+        a2a_event_sink_url=os.getenv("A2A_EVENT_SINK_URL", "").strip(),
+        cma_a2a_push_allowed_url=os.getenv("CMA_A2A_PUSH_ALLOWED_URL", "").strip(),
+        cma_scheduler_queue_url=os.getenv("CMA_SCHEDULER_QUEUE_URL", "").strip(),
+        cma_push_queue_url=os.getenv("CMA_PUSH_QUEUE_URL", "").strip(),
+        cma_pending_input_bucket=os.getenv("CMA_PENDING_INPUT_BUCKET", "").strip(),
         dsql_endpoint=os.getenv("DSQL_ENDPOINT", ""),
         dsql_database=os.getenv("DSQL_DATABASE", "postgres"),
         dsql_role=os.getenv("DSQL_ROLE", "app_runtime"),
-        event_bus_name=os.getenv("EVENT_BUS_NAME", "managed-agent-web-slack-dev"),
+        event_bus_name=os.getenv("EVENT_BUS_NAME", "claude-managed-agents-dev"),
         dev_principal_id=os.getenv("DEV_PRINCIPAL_ID", "00000000-0000-4000-8000-000000000001"),
         web_access_token=_secret("WEB_ACCESS_TOKEN_SECRET_ARN", "WEB_ACCESS_TOKEN") or "",
         web_cookie_secret=_secret("WEB_COOKIE_SECRET_SECRET_ARN", "WEB_COOKIE_SECRET") or "",
@@ -109,6 +134,8 @@ def load_config() -> AppConfig:
         slack_bot_token=_secret("SLACK_BOT_TOKEN_SECRET_ARN", "SLACK_BOT_TOKEN"),
         slack_team_allowlist=os.getenv("SLACK_TEAM_ID") or None,
         slack_user_allowlist=os.getenv("SLACK_USER_ID") or None,
+        slack_user_bot_id=os.getenv("SLACK_USER_BOT_ID") or None,
+        slack_user_app_id=os.getenv("SLACK_USER_APP_ID") or None,
         public_app_url=os.getenv("PUBLIC_APP_URL", "").rstrip("/"),
         slack_bound_thread_replies=_flag("SLACK_BOUND_THREAD_REPLIES"),
         slack_agent_view_enabled=_flag("SLACK_AGENT_VIEW_ENABLED"),

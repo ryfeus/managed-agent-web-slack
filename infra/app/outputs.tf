@@ -2,6 +2,15 @@ output "application_url" {
   value = "https://${aws_cloudfront_distribution.app.domain_name}"
 }
 
+output "private_a2a_url" {
+  value       = local.private_a2a_url
+  description = "Private API URL, reachable only through the application's VPC endpoint."
+}
+
+output "private_a2a_vpc_endpoint_id" {
+  value = aws_vpc_endpoint.a2a_execute_api.id
+}
+
 output "slack_events_url" {
   value = "https://${aws_cloudfront_distribution.app.domain_name}/slack/events"
 }
@@ -16,6 +25,10 @@ output "anthropic_webhook_url" {
 
 output "dsql_endpoint" {
   value = local.dsql_endpoint
+}
+
+output "cma_push_queue_url" {
+  value = aws_sqs_queue.cma_push.id
 }
 
 output "dsql_runtime_role_arns" {

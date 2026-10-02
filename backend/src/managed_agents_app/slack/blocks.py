@@ -40,8 +40,11 @@ def source_link_blocks(permalink: str | None) -> list[dict[str, Any]]:
     ]
 
 
-def tool_approval_blocks(tool_use_id: str, name: str, input_value: object) -> list[dict[str, Any]]:
+def tool_approval_blocks(
+    task_id: str, request_id: str, name: str, input_value: object
+) -> list[dict[str, Any]]:
     rendered = json.dumps(input_value, indent=2, default=str)
+    value = json.dumps({"taskId": task_id, "requestId": request_id}, separators=(",", ":"))
     if len(rendered) > 2500:
         rendered = rendered[:2497] + "..."
     return [
@@ -54,38 +57,38 @@ def tool_approval_blocks(tool_use_id: str, name: str, input_value: object) -> li
         },
         {
             "type": "actions",
-            "block_id": f"tool:{tool_use_id}",
+            "block_id": f"tool:{request_id}",
             "elements": [
                 {
                     "type": "button",
                     "action_id": "agent_tool_allow",
                     "text": {"type": "plain_text", "text": "Allow"},
                     "style": "primary",
-                    "value": tool_use_id,
+                    "value": value,
                 },
                 {
                     "type": "button",
                     "action_id": "agent_tool_deny",
                     "text": {"type": "plain_text", "text": "Deny"},
                     "style": "danger",
-                    "value": tool_use_id,
+                    "value": value,
                 },
                 {
                     "type": "button",
                     "action_id": "agent_tool_deny_with_reason",
                     "text": {"type": "plain_text", "text": "Deny with reason"},
-                    "value": tool_use_id,
+                    "value": value,
                 },
             ],
         },
     ]
 
 
-def feedback_blocks(managed_event_id: str) -> list[dict[str, Any]]:
+def feedback_blocks(task_id: str, message_id: str) -> list[dict[str, Any]]:
     return [
         {
             "type": "context_actions",
-            "block_id": f"feedback:{managed_event_id}",
+            "block_id": f"feedback:{task_id}:{message_id}",
             "elements": [
                 {
                     "type": "feedback_buttons",
@@ -130,29 +133,29 @@ def denial_reason_modal(private_metadata: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def session_unfurl(session_id: str, title: str, status: str, url: str) -> dict[str, Any]:
+def thread_unfurl(thread_id: str, title: str, status: str, url: str) -> dict[str, Any]:
     return {
         "blocks": [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*Claude Session*\n{title or 'Untitled session'}\nStatus: {status}",
+                    "text": f"*Claude Thread*\n{title or 'Untitled thread'}\nStatus: {status}",
                 },
             },
             {
                 "type": "actions",
-                "block_id": f"session:{session_id}",
+                "block_id": f"thread:{thread_id}",
                 "elements": [
                     {
                         "type": "button",
-                        "action_id": "agent_link_session",
+                        "action_id": "agent_link_thread",
                         "text": {"type": "plain_text", "text": "Link this thread"},
-                        "value": session_id,
+                        "value": thread_id,
                     },
                     {
                         "type": "button",
-                        "action_id": "agent_open_session",
+                        "action_id": "agent_open_thread",
                         "text": {"type": "plain_text", "text": "Open in web"},
                         "url": url,
                     },

@@ -5,6 +5,8 @@ cd "$(dirname "$0")/.."
 set -a
 source .env
 set +a
+CMA_REPOSITORY_ROOT="$PWD"
+source scripts/cma_env.sh
 
 export NEXT_PUBLIC_API_BASE_URL="${NEXT_PUBLIC_API_BASE_URL:-http://localhost:3001}"
 export UV_CACHE_DIR="${UV_CACHE_DIR:-$PWD/.uv-cache}"

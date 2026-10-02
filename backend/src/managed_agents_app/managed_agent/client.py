@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from typing import Any, Literal, cast
 
 from anthropic import Anthropic
+from anthropic.types.beta import BetaManagedAgentsAgentParams
 
 from managed_agents_app.config import AppConfig
 from managed_agents_app.models import SessionSummary
@@ -25,8 +26,14 @@ class ManagedAgentClient:
             raise RuntimeError("Missing Claude agent ID")
         if not config.environment_id:
             raise RuntimeError("Missing Claude environment ID")
+        if type(config.agent_version) is not int or config.agent_version < 1:
+            raise RuntimeError("Missing or invalid Claude agent version; set CLAUDE_AGENT_VERSION")
         self.config = config
+        self._agent_version = config.agent_version
         self.raw = raw or Anthropic(api_key=config.anthropic_api_key)
+
+    def _agent_ref(self) -> BetaManagedAgentsAgentParams:
+        return {"type": "agent", "id": self.config.agent_id, "version": self._agent_version}
 
     def create_session(
         self,
@@ -39,7 +46,7 @@ class ManagedAgentClient:
         system_context: str | None = None,
     ) -> SessionSummary:
         params: dict[str, Any] = {
-            "agent": self.config.agent_id,
+            "agent": self._agent_ref(),
             "environment_id": self.config.environment_id,
             "title": title or "New chat",
             "metadata": {
@@ -57,6 +64,39 @@ class ManagedAgentClient:
                 {"type": "user.message", "content": [{"type": "text", "text": first_turn}]}
             ]
         return self._session(self.raw.beta.sessions.create(**params))
+
+    def create_controller_session(
+        self, *, context_id: str, creation_message_id: str, initial_text: str
+    ) -> SessionSummary:
+        """Create an A2A-owned session without fabricating a surface principal."""
+        return self._session(
+            self.raw.beta.sessions.create(
+                agent=self._agent_ref(),
+                environment_id=self.config.environment_id,
+                title="A2A conversation",
+                metadata={
+                    "application": self.config.app_name,
+                    "controller": "a2a-cma",
+                    "a2a_context_id": context_id,
+                    "a2a_creation_message_id": creation_message_id,
+                },
+                initial_events=[
+                    {"type": "user.message", "content": [{"type": "text", "text": initial_text}]}
+                ],
+            )
+        )
+
+    def find_controller_session(self, context_id: str, creation_message_id: str) -> SessionSummary | None:
+        return next(
+            (
+                session
+                for session in self.list_sessions()
+                if session.metadata.get("controller") == "a2a-cma"
+                and session.metadata.get("a2a_context_id") == context_id
+                and session.metadata.get("a2a_creation_message_id") == creation_message_id
+            ),
+            None,
+        )
 
     def retrieve_session(self, session_id: str) -> SessionSummary:
         return self._session(self.raw.beta.sessions.retrieve(session_id))
@@ -110,6 +150,24 @@ class ManagedAgentClient:
         if not approved and reason:
             event["deny_message"] = reason
         self.raw.beta.sessions.events.send(session_id, events=cast(Any, [event]))
+
+    def send_custom_tool_result(
+        self, session_id: str, custom_tool_use_id: str, answer: str, *, is_error: bool = False
+    ) -> None:
+        self.raw.beta.sessions.events.send(
+            session_id,
+            events=cast(
+                Any,
+                [
+                    {
+                        "type": "user.custom_tool_result",
+                        "custom_tool_use_id": custom_tool_use_id,
+                        "content": [{"type": "text", "text": answer}],
+                        "is_error": is_error,
+                    }
+                ],
+            ),
+        )
 
     def interrupt(self, session_id: str) -> None:
         self.raw.beta.sessions.events.send(session_id, events=[{"type": "user.interrupt"}])

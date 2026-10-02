@@ -67,11 +67,13 @@ def test_architecture_checker_accepts_runtime_port_usage(tmp_path):
         ("backend/src/managed_agents_app/config.py", "import boto3\nfrom botocore import client\n"),
         ("backend/src/managed_agents_app/events.py", "import boto3\n"),
         ("backend/src/managed_agents_app/operations.py", "import boto3\n"),
+        ("backend/src/managed_agents_app/cma_controller/pending_input_s3.py", "import boto3\n"),
+        ("backend/src/managed_agents_app/cma_controller/trigger_sqs.py", "import boto3\n"),
         ("backend/src/managed_agents_app/slack/client.py", "import slack_sdk\n"),
         ("backend/src/managed_agents_app/slack/signatures.py", "from slack_sdk import signature\n"),
         ("backend/tests/test_retry_and_blocks.py", "from slack_sdk.errors import SlackApiError\n"),
         ("backend/src/managed_agents_app/managed_agent/client.py", "import anthropic\n"),
-        ("backend/src/managed_agents_app/handlers/anthropic_webhook.py", "from anthropic import Anthropic\n"),
+        ("backend/src/managed_agents_app/cma_controller/webhook.py", "from anthropic import Anthropic\n"),
     ],
 )
 def test_architecture_checker_accepts_exact_sdk_allowlist(tmp_path, relative_path, source):
@@ -92,6 +94,94 @@ def test_architecture_checker_rejects_unapproved_sdk_helper(tmp_path, sdk):
     assert result.returncode == 1
     assert f"provider SDK import '{sdk}' is not allowed here" in result.stderr
     assert "helper.py:1" in result.stderr
+
+
+def test_architecture_checker_rejects_adjacent_unapproved_s3_adapter(tmp_path):
+    root = architecture_root(tmp_path)
+    helper = root / "backend/src/managed_agents_app/cma_controller/other_s3.py"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_text("import boto3\n", encoding="utf-8")
+    result = run_checker("check_architecture.py", root)
+    assert result.returncode == 1
+    assert "provider SDK import 'boto3' is not allowed here" in result.stderr
+
+
+@pytest.mark.parametrize("package", ["a2a_client", "agent_control_plane", "a2a_event_sink", "agui_bridge"])
+def test_architecture_checker_rejects_controller_import_from_a2a_application(tmp_path, package):
+    root = architecture_root(tmp_path)
+    helper = root / f"backend/src/managed_agents_app/{package}/unsafe.py"
+    helper.parent.mkdir(parents=True, exist_ok=True)
+    helper.write_text("from managed_agents_app.cma_controller import service\n", encoding="utf-8")
+    result = run_checker("check_architecture.py", root)
+    assert result.returncode == 1
+    assert "A2A application code may not import" in result.stderr
+
+
+def test_architecture_checker_rejects_web_api_provider_access(tmp_path):
+    root = architecture_root(tmp_path)
+    target = root / "backend/src/managed_agents_app/handlers/web_api.py"
+    target.write_text("from managed_agents_app.managed_agent import client\n", encoding="utf-8")
+    result = run_checker("check_architecture.py", root)
+    assert result.returncode == 1
+    assert "Web API may not import 'managed_agents_app.managed_agent'" in result.stderr
+
+
+@pytest.mark.parametrize("package", ["handlers", "slack"])
+def test_architecture_checker_rejects_surface_controller_import(tmp_path, package):
+    root = architecture_root(tmp_path)
+    target = root / f"backend/src/managed_agents_app/{package}/unsafe.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("from managed_agents_app.cma_controller import service\n", encoding="utf-8")
+    result = run_checker("check_architecture.py", root)
+    assert result.returncode == 1
+    assert "surface code may not import 'managed_agents_app.cma_controller'" in result.stderr
+
+
+def test_architecture_checker_rejects_legacy_production_path(tmp_path):
+    root = architecture_root(tmp_path)
+    target = root / "backend/src/managed_agents_app/handlers/example.py"
+    target.write_text('def route():\n    return "/api/sessions"\n', encoding="utf-8")
+    result = run_checker("check_architecture.py", root)
+    assert result.returncode == 1
+    assert "forbidden legacy token" in result.stderr
+
+
+def test_architecture_checker_rejects_frontend_provider_token(tmp_path):
+    root = architecture_root(tmp_path)
+    target = root / "apps/web/app/assistant.tsx"
+    target.parent.mkdir(parents=True)
+    target.write_text('export const id = "sesn_old";\n', encoding="utf-8")
+    result = run_checker("check_architecture.py", root)
+    assert result.returncode == 1
+    assert "forbidden legacy token" in result.stderr
+
+
+def test_architecture_checker_rejects_bridge_runtime_agent_access(tmp_path):
+    root = architecture_root(tmp_path)
+    target = root / "backend/src/managed_agents_app/agui_bridge/app.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def run(runtime):\n    return runtime.agent\n", encoding="utf-8")
+    result = run_checker("check_architecture.py", root)
+    assert result.returncode == 1
+    assert "Web/A2A code may not access Runtime.agent" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from managed_agents_app.managed_agent import ManagedAgentClient\n",
+        "from managed_agents_app.cma_controller import service\n",
+        "from managed_agents_app.ports.agent import AgentGateway\n",
+        "def handle(runtime):\n    return runtime.agent\n",
+    ],
+)
+def test_architecture_checker_rejects_slack_cma_access(tmp_path, source):
+    root = architecture_root(tmp_path)
+    target = root / "backend/src/managed_agents_app/handlers/agent_input.py"
+    target.write_text(source, encoding="utf-8")
+    result = run_checker("check_architecture.py", root)
+    assert result.returncode == 1
+    assert "Slack code may not" in result.stderr
 
 
 @pytest.mark.parametrize("client", ["ManagedAgentClient", "SlackClient", "WebClient"])
@@ -151,6 +241,40 @@ def test_architecture_checker_rejects_neutral_model_to_provider_dependency(tmp_p
     assert "models.py:1" in result.stderr
 
 
+@pytest.mark.parametrize(
+    "source, forbidden",
+    [
+        ("from managed_agents_app.db.thread_repository import ThreadRepository\n", "db.thread_repository"),
+        ("from managed_agents_app.db import thread_repository\n", "db.thread_repository"),
+        ("from ..db.thread_repository import ThreadRepository\n", "db.thread_repository"),
+        ("from managed_agents_app.slack.client import SlackClient\n", "slack"),
+        ("from .. import slack\n", "slack"),
+        ("from managed_agents_app.handlers import web_api\n", "handlers"),
+        ("from managed_agents_app.testing import fake_agent\n", "testing"),
+    ],
+)
+def test_architecture_checker_rejects_controller_surface_imports(tmp_path, source, forbidden):
+    root = architecture_root(tmp_path)
+    controller = root / "backend/src/managed_agents_app/cma_controller/example.py"
+    controller.parent.mkdir(parents=True)
+    controller.write_text(source, encoding="utf-8")
+    result = run_checker("check_architecture.py", root)
+    assert result.returncode == 1
+    assert f"CMA controller may not import 'managed_agents_app.{forbidden}" in result.stderr
+    assert "cma_controller/example.py:1" in result.stderr
+
+
+def test_architecture_checker_allows_controller_provider_adapter(tmp_path):
+    root = architecture_root(tmp_path)
+    controller = root / "backend/src/managed_agents_app/cma_controller/example.py"
+    controller.parent.mkdir(parents=True)
+    controller.write_text(
+        "from managed_agents_app.managed_agent.client import ManagedAgentClient\n", encoding="utf-8"
+    )
+    result = run_checker("check_architecture.py", root)
+    assert result.returncode == 0, result.stderr
+
+
 def test_architecture_checker_rejects_transcript_migration_fields(tmp_path):
     root = architecture_root(tmp_path)
     (root / "backend/migrations/002.sql").write_text(
@@ -160,6 +284,17 @@ def test_architecture_checker_rejects_transcript_migration_fields(tmp_path):
     assert result.returncode == 1
     assert "message_text" in result.stderr
     assert "002.sql:1" in result.stderr
+
+
+@pytest.mark.parametrize("field", ["user_text", "assistant_text", "task_json", "history_json"])
+def test_architecture_checker_rejects_controller_transcript_fields(tmp_path, field):
+    root = architecture_root(tmp_path)
+    (root / "backend/migrations/002.sql").write_text(
+        f"ALTER TABLE cma_tasks ADD COLUMN {field} TEXT;\n", encoding="utf-8"
+    )
+    result = run_checker("check_architecture.py", root)
+    assert result.returncode == 1
+    assert field in result.stderr
 
 
 def test_repository_rails_accept_valid_registry(tmp_path):

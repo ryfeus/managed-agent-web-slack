@@ -11,6 +11,12 @@ status: stable
 aliases:
   - Claude Managed Agents operations
 sources:
+  - id: anthropic-apply
+    resource: "https://platform.claude.com/docs/en/cli-sdks-libraries/cli/apply"
+    title: "Manage resources as code with ant apply"
+  - id: local-cma-contract
+    resource: "../../docs/feature-contract-cma-repo-managed-config.md"
+    title: "Repository-managed CMA configuration contract"
   - id: anthropic-sessions
     resource: "https://platform.claude.com/docs/en/managed-agents/sessions"
     title: "Start a session"
@@ -22,7 +28,13 @@ sources:
     title: "Subscribe to webhooks"
   - id: local-managed-agent-client
     resource: "../../backend/src/managed_agents_app/managed_agent/client.py"
-    title: "Application Managed Agent client"
+    title: "Controller-private Managed Agent client"
+  - id: local-controller-service
+    resource: "../../backend/src/managed_agents_app/cma_controller/service.py"
+    title: "A2A controller service"
+  - id: final-cutover-contract
+    resource: "../../docs/feature-contract-final-cutover.md"
+    title: "Final A2A cutover feature contract"
 generated:
   by: openai-codex/gpt-5
   at: 2026-09-03T04:34:14Z
@@ -32,74 +44,67 @@ generated:
 
 ## Ownership boundary
 
-Treat the Managed Agent session event log as the canonical source for conversation messages, agent output, tool activity, execution status, and usage. Application storage may authorize a session and bind it to external surfaces, but it must not become a second transcript database.
+Anthropic owns the canonical Managed Agent event log, conversation, tool activity, execution status, and usage. Only the private CMA controller reads or writes provider sessions and events. Web and Slack use authorized application threads and A2A Tasks. Aurora DSQL stores application identity and routing metadata plus controller-private correlation and opaque temporary-object keys; it never stores a transcript.
 
-A session is an instance of an agent in an environment. The agent ID selects behavior and tools; the environment ID selects its execution environment. Load both from deployment configuration.
+A provider session is an instance of the configured agent in its environment.
+Definitions and genuine identity are tracked under `cma/`. Deployment reconciles
+them with ant apply, resolves ID/version/environment from `claude-lock.json`, and
+injects them only into controller components. Both session creation paths pin
+the exact agent version. Surfaces receive neither these values nor credentials.
 
-## Session lifecycle
+## Repository-managed configuration
 
-A session can be created first and started later with a `user.message`, or created with initial events. Initial events reduce round trips and give Slack ingestion a single idempotent creation operation.
+Use ant >= 1.30.0 and credentials authorized for the lock's origin. Preview with
+`npm run cma:plan`, deploy with `./scripts/deploy.sh`, and inspect local identity
+with `npm run cma:show`. Normal verification validates files locally without ant
+or provider access. Deployment plan-only uses the current lock rather than an
+unapplied future version.
 
-Use a stable creation request ID when the API supports it. For Slack, the signed Slack event ID is the natural key. Before creating a replacement session after an uncertain response, search by that creation request ID.
+Prefer Console Export as code with genuine lock state when adopting resources.
+Without it, reproduce configuration and bootstrap replacements; matching names
+do not adopt identity. Keep old resources untouched through live cutover. The
+initial repository migration uses replacements because no export was available.
 
-Record only the resulting session ID, its authorized principal, its agent/environment identity, and its originating surface in DSQL.
+Serialize applies/deployments. Retain, review, and commit lock updates even after
+partial failure. Console/API edits intentionally block apply; normal scripts never
+force or prune. Review the dry-run result because a blocked plan can exit zero.
 
-## Event submission and streaming
+An agent version applied before an AWS failure is not selected by Lambdas already
+pinned to a previous version. Environment configuration is selected by ID and may
+affect subsequent sessions before AWS rollout. Rollback requires reverting and
+applying the relevant source, redeploying the agent pin, and independently checking
+environment behavior. Webhook registration and secrets remain separate.
 
-Managed Agents communication is event-based. Submit user events and consume session, agent, span, and status events. The SDK supplies the Managed Agents beta header; direct HTTP clients must track the currently required API header from official documentation.
+## Session and Task lifecycle
 
-The browser surface should stream canonical events through SSE after checking DSQL session ownership. Stop the stream after a terminal or idle status appropriate to the UI, while allowing the client to reconnect and fetch retained events.
+The controller creates a CMA session while admitting the first A2A Task for a context. It holds subsequent Tasks in FIFO order and uses stable creation and message IDs to reconcile retries. Provider session IDs remain in controller-owned `cma_contexts`; application `agent_threads` and `agent_tasks` hold A2A context and Task IDs only.
 
-For Slack, do not keep the ingress request open. Submit asynchronously, then use a later webhook to trigger projection.
+An uncertain provider send cannot be retried automatically without authoritative evidence that CMA rejected it. KL-003 holds that Task for operator inspection. Pending user content, denial reasons, and clarification answers use temporary object storage; DSQL stores only opaque keys. The scheduler removes consumed objects and sweeps unreferenced old objects.
 
-## Webhooks are change notifications
+## Event submission and reconciliation
 
-Register a public HTTPS endpoint in **Manage → Webhooks** in the Claude Console. Store the one-time `whsec_` signing secret in Secrets Manager; never put it in Terraform state or logs.
+The controller submits user input, tool decisions, and interruption to CMA. It reads provider events to build canonical A2A Task history and state. A Task subscription is not replay: clients load `GetTask` history before subscribing and reconcile again after closure or failure. The pinned A2A client may end its iterator after an agent Message (KL-004), so closure alone never means completion.
 
-This application subscribes to:
+The browser receives AG-UI events from its bridge; Slack receives A2A Task projection. Neither surface tails CMA events or addresses a provider session.
 
-- `session.status_idled`
-- `session.status_terminated`
-- `session.budget_reached`
+## Webhooks are controller wakeups
 
-Every delivery includes webhook identity, timestamp, and signature headers. Verify and parse the raw delivery with the Anthropic SDK before emitting an internal event. Reject stale or invalid deliveries.
+Register the public HTTPS webhook in Claude Console and store the one-time `whsec_` signing secret in Secrets Manager. The deployment subscribes to `session.status_idled`, `session.status_terminated`, and `session.budget_reached`; `session.status_rescheduled` may also wake the controller when sent.
 
-Webhook payloads identify the changed resource but are not the durable event log. After verification, retrieve the session and list canonical events before deciding what to project. Reconciliation protects against retries, reordering, and missed webhook deliveries.
-
-## Projection rules
-
-When a session changes:
-
-1. Find authorized external surface bindings by session ID.
-2. Fetch canonical Managed Agent events.
-3. Select projectable agent messages.
-4. Claim each `(surface binding, managed event ID)` receipt in DSQL.
-5. Post the message to the external surface.
-6. Record the external message timestamp.
-
-Use leases for abandoned projection claims so a crashed worker does not suppress a response permanently. Never infer completion from webhook delivery alone.
+Verify the raw delivery with the Anthropic SDK. For a known controller-private session, schedule its context for reconciliation. Ignore unknown sessions. The webhook does not publish a surface-level session event and does not by itself prove a final agent answer. Controller reconciliation updates the A2A Task; A2A push and the application event sink notify the surfaces.
 
 ## Failure handling
 
-- **Session creation timed out:** query by creation request ID before retrying creation.
-- **Message submission returned an uncertain result:** retain the client request ID and reconcile the session event log.
-- **SSE disconnected:** reconnect and list retained events; do not synthesize missing transcript state locally.
-- **Webhook returns 503:** confirm the signing key has an active Secrets Manager version and the Lambda region is correct.
-- **Webhook verifies but projection is empty:** retrieve the session events and confirm a new `agent.message` exists.
-- **Repeated Slack output:** inspect projection receipt uniqueness and lease recovery.
-- **Budget reached:** surface a terminal control message and require an explicit new session or budget decision.
+- **Session creation response uncertain:** inspect controller state and provider evidence before creating another provider session.
+- **Provider input acceptance uncertain:** inspect the held Task and CMA evidence. Retry only with verified no-side-effect; otherwise fail safely or reconcile the accepted input. See [operations](../../docs/operations.md).
+- **A2A stream closes early:** use `GetTask` and stable message IDs, then re-subscribe while nonterminal.
+- **Webhook returns 503:** check the signing-key secret, controller DSQL lookup, scheduler queue, and Lambda logs.
+- **No Slack projection:** inspect the A2A Task, push receipt, application event, and Slack projection lease in that order. Never infer provider output from an idle webhook alone.
+- **Budget reached:** inspect controller Task state and provider evidence before permitting more input.
 
 ## Deterministic verification
 
-Create a temporary authorized session and send a low-cost deterministic request such as `Reply with exactly: managed-agent-smoke-ok`. Success requires:
-
-- Session creation succeeds.
-- The user event is accepted.
-- The canonical log contains `session.status_running`, an `agent.message`, and an idle or terminal status.
-- The response text matches the assertion.
-- A signed webhook for that session is accepted.
-
-Archive temporary web-only smoke sessions. Do not archive user-created Slack sessions automatically because the user may continue them.
+A local semantic test sends a Web or Slack turn through `ThreadAgentService`, the A2A controller, and `FakeCmaProvider`; it checks one Task, canonical history, push delivery, and surface projection without writing transcript content to DSQL. Live provider acceptance checks use real mapped-human Slack and Web turns, signed webhooks, and Task metadata; provider session IDs remain private to operator diagnostics.
 
 ## Related knowledge
 

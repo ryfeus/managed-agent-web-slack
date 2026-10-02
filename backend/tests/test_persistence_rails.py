@@ -67,6 +67,16 @@ def test_persistence_contract_applies_supported_alter_forms_in_order(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_persistence_contract_removes_dropped_legacy_table(tmp_path):
+    root = persistence_root(
+        tmp_path,
+        "CREATE TABLE legacy (id TEXT); DROP TABLE IF EXISTS legacy; CREATE TABLE current_state (id TEXT);",
+        {"current_state": ["id"]},
+    )
+    result = run_checker(root)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize(
     "sql, tables, expected",
     [

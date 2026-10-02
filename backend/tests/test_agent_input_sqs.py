@@ -18,9 +18,11 @@ def _record(message_id: str = "message-1", body: object | None = None) -> dict:
 
 def test_sqs_adapter_processes_a_valid_record(runtime, monkeypatch) -> None:
     received: list[dict] = []
-    monkeypatch.setattr(
-        agent_input_sqs, "handle_domain_event", lambda _runtime, event: received.append(event)
-    )
+
+    async def process(_runtime, event):
+        received.append(event)
+
+    monkeypatch.setattr(agent_input_sqs, "handle_domain_event_async", process)
 
     result = agent_input_sqs.handle_sqs_event(runtime, {"Records": [_record()]})
 
@@ -36,19 +38,20 @@ def test_sqs_adapter_reports_malformed_json_as_a_partial_failure(runtime) -> Non
 
 
 def test_sqs_adapter_reports_handler_failure_as_a_partial_failure(runtime, monkeypatch) -> None:
-    monkeypatch.setattr(
-        agent_input_sqs, "handle_domain_event", lambda *_: (_ for _ in ()).throw(RuntimeError())
-    )
+    async def process(*_args):
+        raise RuntimeError()
+
+    monkeypatch.setattr(agent_input_sqs, "handle_domain_event_async", process)
     result = agent_input_sqs.handle_sqs_event(runtime, {"Records": [_record()]})
     assert result == {"batchItemFailures": [{"itemIdentifier": "message-1"}]}
 
 
 def test_sqs_adapter_keeps_successful_records_out_of_a_mixed_failure_response(runtime, monkeypatch) -> None:
-    def process(_runtime, event):
+    async def process(_runtime, event):
         if event["detail"]["id"] == "bad":
             raise RuntimeError("planned")
 
-    monkeypatch.setattr(agent_input_sqs, "handle_domain_event", process)
+    monkeypatch.setattr(agent_input_sqs, "handle_domain_event_async", process)
     result = agent_input_sqs.handle_sqs_event(
         runtime,
         {

@@ -2,17 +2,33 @@
   {
     "id": "KL-001",
     "title": "No production per-session input sequencer",
-    "status": "open",
+    "status": "resolved",
     "owner": "architecture",
-    "test": "e2e/concurrency.spec.ts",
+    "test": "backend/tests/integration/test_cma_controller_postgres.py",
     "desired_behavior": "Inputs for one Managed Agent session execute in accepted order."
   },
   {
     "id": "KL-002",
-    "title": "No provider idempotency key for Managed Agent input send",
-    "status": "open",
+    "title": "Slack retry after accepted A2A send can duplicate provider input",
+    "status": "resolved",
     "owner": "architecture",
     "test": "e2e/sqs.spec.ts",
-    "desired_behavior": "A crash after Anthropic accepts an input but before DSQL records completion must not duplicate the Managed Agent input."
+    "desired_behavior": "A Slack retry after A2A acceptance must converge on the existing Task without duplicating provider input; ambiguous provider acceptance remains separately tracked by KL-003."
+  },
+  {
+    "id": "KL-003",
+    "title": "Ambiguous controller send can remain held without provider evidence",
+    "status": "open",
+    "owner": "architecture",
+    "test": "backend/tests/integration/test_cma_controller_postgres.py",
+    "desired_behavior": "A provider idempotency key or authoritative delivery status would let the controller safely retry an unconfirmed send without operator intervention. Controller admins can now inspect and manually fail a hold or retry ambiguous input delivery after external verification that CMA did not accept it."
+  },
+  {
+    "id": "KL-004",
+    "title": "Pinned A2A client stops consuming a stream after an agent Message",
+    "status": "open",
+    "owner": "a2a-sdk",
+    "test": "backend/tests/integration/test_cma_controller_postgres.py",
+    "desired_behavior": "The official client should continue consuming subsequent TaskStatusUpdateEvents after a complete agent Message. The controller emits both events on HTTP+JSON; clients can use GetTask for final status until SDK behavior changes."
   }
 ]

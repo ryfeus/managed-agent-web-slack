@@ -5,8 +5,9 @@ from functools import cached_property, lru_cache
 
 from managed_agents_app.config import AppConfig, load_config
 from managed_agents_app.db import Database
+from managed_agents_app.db.slack_a2a_repository import SlackA2ARepository
+from managed_agents_app.db.thread_repository import ThreadRepository
 from managed_agents_app.faults import Faults, NoFaults
-from managed_agents_app.ports.agent import AgentGateway
 from managed_agents_app.ports.events import EventBus
 from managed_agents_app.ports.slack import SlackGateway
 
@@ -15,10 +16,19 @@ from managed_agents_app.ports.slack import SlackGateway
 class Runtime:
     config: AppConfig
     db: Database
-    agent: AgentGateway
     slack: SlackGateway
     events: EventBus
     faults: Faults = field(default_factory=NoFaults)
+    a2a_transport: object | None = None
+    local_a2a: object | None = None
+
+    @property
+    def threads(self) -> ThreadRepository:
+        return ThreadRepository(self.config)
+
+    @property
+    def slack_a2a(self) -> SlackA2ARepository:
+        return SlackA2ARepository(self.config)
 
 
 class ProductionRuntime:
@@ -33,10 +43,12 @@ class ProductionRuntime:
         return Database(self.config)
 
     @cached_property
-    def agent(self) -> AgentGateway:
-        from managed_agents_app.managed_agent import ManagedAgentClient
+    def threads(self) -> ThreadRepository:
+        return ThreadRepository(self.config)
 
-        return ManagedAgentClient(self.config)
+    @cached_property
+    def slack_a2a(self) -> SlackA2ARepository:
+        return SlackA2ARepository(self.config)
 
     @cached_property
     def slack(self) -> SlackGateway:

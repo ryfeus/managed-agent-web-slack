@@ -4,7 +4,6 @@ from threading import Barrier
 import pytest
 
 from managed_agents_app.runtime import get_runtime
-from managed_agents_app.testing.fake_agent import FakeManagedAgent
 from managed_agents_app.testing.local_event_bus import LocalEventBus
 from managed_agents_app.testing.recording_slack import RecordingSlack
 
@@ -13,15 +12,21 @@ def test_e2e_configuration_never_resolves_secrets(monkeypatch):
     from managed_agents_app.config import _secret, load_config
 
     monkeypatch.setenv("APP_ENV", "e2e")
+    monkeypatch.setenv("CLAUDE_AGENT_VERSION", "1")
     monkeypatch.setenv("ANTHROPIC_API_KEY_SECRET_ARN", "must-not-read")
+    monkeypatch.setenv("SLACK_USER_BOT_ID", "B_USER")
+    monkeypatch.setenv("SLACK_USER_APP_ID", "A_USER")
     monkeypatch.setattr("managed_agents_app.config.boto3.client", lambda *_: pytest.fail("AWS contacted"))
     _secret.cache_clear()
     load_config.cache_clear()
     try:
         config = load_config()
         assert config.anthropic_api_key == "e2e-agent"
+        assert config.agent_version == 1
         assert config.web_access_token == "e2e-access-token"
         assert config.web_cookie_secret == "e2e-cookie-secret-at-least-32-bytes"
+        assert config.slack_user_bot_id == "B_USER"
+        assert config.slack_user_app_id == "A_USER"
     finally:
         _secret.cache_clear()
         load_config.cache_clear()
@@ -69,7 +74,7 @@ def test_runtime_modes(config):
     )
     local = get_runtime(e2e)
     assert local is get_runtime(e2e)
-    assert isinstance(local.agent, FakeManagedAgent)
+    assert not hasattr(local, "agent")
     assert isinstance(local.slack, RecordingSlack)
 
 
@@ -78,10 +83,10 @@ def test_runtime_modes(config):
     [
         ("managed_agents_app.handlers.slack_ingress", "handler", ({}, None)),
         ("managed_agents_app.handlers.agent_input_sqs", "handler", ({}, None)),
-        ("managed_agents_app.handlers.anthropic_webhook", "handler", ({}, None)),
+        ("managed_agents_app.cma_controller.webhook", "handler", ({}, None)),
         ("managed_agents_app.handlers.slack_projector", "handler", ({}, None)),
         ("managed_agents_app.handlers.web_api", "handler", ({}, None)),
-        ("managed_agents_app.handlers.web_stream", "production_stream", ("sesn_test", None)),
+        ("managed_agents_app.agui_bridge.app", "production_app", ()),
     ],
 )
 def test_production_entrypoints_reject_e2e_runtime(
@@ -110,21 +115,6 @@ def test_reset_database_guard(config, url):
         validate_local_database(
             config.model_copy(update={"app_env": "e2e", "database_mode": "postgres", "database_url": url})
         )
-
-
-def test_broadcast_subscriptions_do_not_advance_or_replay():
-    agent = FakeManagedAgent(LocalEventBus())
-    session = agent.create_session(principal_id="owner", surface="web", creation_request_id="create")
-    agent.script("hello", [{"type": "agent.message", "content": []}], automatic=False)
-    agent.send_message(session.id, "hello")
-    first = agent.stream_events(session.id)
-    second = agent.stream_events(session.id)
-    assert len(agent.list_events(session.id)) == 2
-    agent.advance(session.id)
-    assert next(first)["type"] == next(second)["type"] == "agent.message"
-    agent.reset()
-    assert list(first) == list(second) == []
-    assert agent.snapshot()["sessions"] == []
 
 
 def test_queue_failure_retry_duplicate_and_bounded_drain():
@@ -170,27 +160,3 @@ def test_slack_records_wrapper_payloads_and_enforces_stream_lifecycle():
         slack.append_stream_chunks("C", ts, [{"type": "markdown_text", "text": "late"}])
     slack.reset()
     assert slack.start_stream("C", "1", "T", "U", "new") == "1000.000001"
-
-
-def test_interrupt_script_cancels_pending_tool_without_success():
-    agent = FakeManagedAgent(LocalEventBus())
-    session = agent.create_session(principal_id="owner", surface="web", creation_request_id="interrupt")
-    agent.script(
-        "tool",
-        [
-            {"id": "tool_1", "type": "agent.tool_use", "name": "web_fetch", "input": {}},
-            {
-                "type": "session.status_idle",
-                "stop_reason": {"type": "requires_action", "event_ids": ["tool_1"]},
-            },
-        ],
-    )
-    agent.send_message(session.id, "tool")
-    agent.interrupt_events = [{"type": "session.status_terminated"}]
-    agent.interrupt(session.id)
-    events = agent.list_events(session.id)
-    result = next(e for e in events if e["type"] == "agent.tool_result")
-    assert result["is_error"] is True
-    assert result["content"] == [{"type": "text", "text": "Interrupted"}]
-    assert events[-1]["type"] == "session.status_terminated"
-    assert agent.retrieve_session(session.id).status == "terminated"

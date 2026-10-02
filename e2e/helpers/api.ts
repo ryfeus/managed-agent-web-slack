@@ -16,12 +16,6 @@ export const answerEvents = (text: string) => [
     { id: 'answer_final', type: 'agent.message', content: [{ type: 'text', text }] },
     { type: 'session.status_idle', stop_reason: { type: 'end_turn' } },
 ];
-export async function ready(api: APIRequestContext, sessionId?: string, count = 1) {
-    await expect.poll(async () => {
-        const s = await state(api);
-        return sessionId ? s.agent.subscribers[sessionId] || 0 : Object.values<number>(s.agent.subscribers).reduce((a, b) => a + b, 0);
-    }).toBeGreaterThanOrEqual(count);
-}
 export async function drain(api: APIRequestContext) {
     const result = await control(api, 'events/drain');
     expect(result.pending).toEqual([]);

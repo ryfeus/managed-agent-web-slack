@@ -5,10 +5,10 @@ import json
 from managed_agents_app.domain import (
     SLACK_FEEDBACK_RECEIVED,
     SLACK_MESSAGE_RECEIVED,
-    SLACK_SESSION_LINK_REQUESTED,
-    SLACK_SESSION_LINK_SHARED,
-    SLACK_SESSION_STOP_REQUESTED,
     SLACK_SHORTCUT_RECEIVED,
+    SLACK_THREAD_LINK_REQUESTED,
+    SLACK_THREAD_LINK_SHARED,
+    SLACK_THREAD_STOP_REQUESTED,
     SLACK_TOOL_CONFIRMATION_REQUESTED,
 )
 from managed_agents_app.slack.normalize import ModalOpenRequest, normalize_event, normalize_interaction
@@ -92,6 +92,46 @@ def test_channel_message_rules_and_bot_filtering() -> None:
     assert normalize_event(envelope({"type": "message", "subtype": "message_changed"})) is None
 
 
+def test_only_configured_user_token_bot_and_app_are_accepted() -> None:
+    mention = envelope(
+        {
+            "type": "app_mention",
+            "user": "U1",
+            "channel": "C1",
+            "ts": "1",
+            "text": "<@UBOT> hello",
+            "bot_id": "B_USER",
+            "app_id": "A_USER",
+        }
+    )
+    assert normalize_event(mention) is None
+    assert normalize_event(mention, allowed_bot_id="B_USER") is None
+    assert normalize_event(mention, allowed_app_id="A_USER") is None
+    assert normalize_event(mention, allowed_bot_id="B_OTHER", allowed_app_id="A_USER") is None
+    assert normalize_event(mention, allowed_bot_id="B_USER", allowed_app_id="A_OTHER") is None
+    accepted = normalize_event(mention, allowed_bot_id="B_USER", allowed_app_id="A_USER")
+    assert accepted and accepted[0] == SLACK_MESSAGE_RECEIVED
+    assert accepted[1].user_id == "U1"
+
+    reply = envelope(
+        {
+            **mention["event"],
+            "type": "message",
+            "ts": "2",
+            "thread_ts": "1",
+            "text": "continue",
+        }
+    )
+    accepted_reply = normalize_event(reply, allowed_bot_id="B_USER", allowed_app_id="A_USER")
+    assert accepted_reply and accepted_reply[1].thread_ts == "1"
+    reply["event"].pop("thread_ts")
+    assert normalize_event(reply, allowed_bot_id="B_USER", allowed_app_id="A_USER") is None
+    reply["event"].update(thread_ts="1", subtype="bot_message")
+    assert normalize_event(reply, allowed_bot_id="B_USER", allowed_app_id="A_USER") is not None
+    reply["event"]["subtype"] = "message_changed"
+    assert normalize_event(reply, allowed_bot_id="B_USER", allowed_app_id="A_USER") is None
+
+
 def test_stop_link_shared_and_compatibility_link() -> None:
     stop = normalize_event(
         envelope(
@@ -103,7 +143,7 @@ def test_stop_link_shared_and_compatibility_link() -> None:
             }
         )
     )
-    assert stop and stop[0] == SLACK_SESSION_STOP_REQUESTED
+    assert stop and stop[0] == SLACK_THREAD_STOP_REQUESTED
 
     shared = normalize_event(
         envelope(
@@ -112,11 +152,11 @@ def test_stop_link_shared_and_compatibility_link() -> None:
                 "user": "U1",
                 "channel": "C1",
                 "message_ts": "3",
-                "links": [{"url": "https://example.test/?session=sesn_1"}],
+                "links": [{"url": "https://example.test/?thread=00000000-0000-4000-8000-000000000001"}],
             }
         )
     )
-    assert shared and shared[0] == SLACK_SESSION_LINK_SHARED
+    assert shared and shared[0] == SLACK_THREAD_LINK_SHARED
 
     link = normalize_event(
         envelope(
@@ -125,11 +165,12 @@ def test_stop_link_shared_and_compatibility_link() -> None:
                 "user": "U1",
                 "channel": "C1",
                 "ts": "4",
-                "text": "<@UBOT> link sesn_abc-123",
+                "text": "<@UBOT> link 00000000-0000-4000-8000-000000000001",
             }
         )
     )
-    assert link and link[1].command == "link" and link[1].link_session_id == "sesn_abc-123"
+    assert link and link[1].command == "link"
+    assert link[1].link_thread_id == "00000000-0000-4000-8000-000000000001"
 
 
 def block_payload(action_id: str, value: str) -> dict:
@@ -145,25 +186,26 @@ def block_payload(action_id: str, value: str) -> dict:
 
 def test_tool_feedback_and_link_interactions() -> None:
     raw = "payload=one"
-    allow = normalize_interaction(block_payload("agent_tool_allow", "tool_1"), raw)
+    approval_value = json.dumps({"taskId": "task-1", "requestId": "req-1"})
+    allow = normalize_interaction(block_payload("agent_tool_allow", approval_value), raw)
     assert allow and not isinstance(allow, ModalOpenRequest)
     assert allow[0] == SLACK_TOOL_CONFIRMATION_REQUESTED and allow[1].approved
     assert allow[1].interaction_id == interaction_id(raw)
 
-    modal = block_payload("agent_tool_deny_with_reason", "tool_1")
+    modal = block_payload("agent_tool_deny_with_reason", approval_value)
     modal["trigger_id"] = "trigger"
     result = normalize_interaction(modal, raw)
     assert isinstance(result, ModalOpenRequest)
 
     feedback = block_payload("agent_feedback", "positive")
-    feedback["actions"][0]["block_id"] = "feedback:evt_1"
+    feedback["actions"][0]["block_id"] = "feedback:task-1:message-1"
     result = normalize_interaction(feedback, raw)
     assert result and not isinstance(result, ModalOpenRequest)
-    assert result[0] == SLACK_FEEDBACK_RECEIVED and result[1].managed_event_id == "evt_1"
+    assert result[0] == SLACK_FEEDBACK_RECEIVED and result[1].message_id == "message-1"
 
-    linked = normalize_interaction(block_payload("agent_link_session", "sesn_1"), raw)
+    linked = normalize_interaction(block_payload("agent_link_thread", "thread-1"), raw)
     assert linked and not isinstance(linked, ModalOpenRequest)
-    assert linked[0] == SLACK_SESSION_LINK_REQUESTED
+    assert linked[0] == SLACK_THREAD_LINK_REQUESTED
 
 
 def test_shortcut_and_denial_reason_submission() -> None:
@@ -187,7 +229,8 @@ def test_shortcut_and_denial_reason_submission() -> None:
             "team_id": "T1",
             "channel_id": "C1",
             "thread_ts": "1",
-            "tool_use_id": "tool_1",
+            "task_id": "task-1",
+            "request_id": "req-1",
         }
     )
     denial = normalize_interaction(

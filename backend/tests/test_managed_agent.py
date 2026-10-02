@@ -43,6 +43,8 @@ def test_create_and_idempotency_lookup(config) -> None:
     )
     assert created.id == "sesn_1"
     kwargs = raw.beta.sessions.create.call_args.kwargs
+    assert kwargs["agent"] == {"type": "agent", "id": "agent_test", "version": 7}
+    assert kwargs["environment_id"] == "env_test"
     assert kwargs["metadata"]["owner_id"] == "principal-1"
     assert [event["type"] for event in kwargs["initial_events"]] == ["user.message"]
     assert kwargs["initial_events"][0]["content"][0]["text"].startswith("context\n\nUser request:")
@@ -87,6 +89,38 @@ def test_event_listing_and_streaming(config) -> None:
     assert raw.beta.sessions.events.stream.call_args.kwargs["timeout"] == 45.0
 
 
+def test_controller_session_metadata_and_full_event_iteration(config) -> None:
+    raw = raw_client()
+    raw.beta.sessions.create.return_value = session(
+        metadata={
+            "controller": "a2a-cma",
+            "a2a_context_id": "context_1",
+            "a2a_creation_message_id": "message_1",
+        }
+    )
+    raw.beta.sessions.list.return_value = [raw.beta.sessions.create.return_value]
+    raw.beta.sessions.events.list.return_value = [
+        {"id": f"event_{index}", "type": "agent.message"} for index in range(150)
+    ]
+    managed = ManagedAgentClient(config, raw)
+    created = managed.create_controller_session(
+        context_id="context_1", creation_message_id="message_1", initial_text="hello"
+    )
+    kwargs = raw.beta.sessions.create.call_args.kwargs
+    assert kwargs["agent"] == {"type": "agent", "id": "agent_test", "version": 7}
+    assert kwargs["environment_id"] == "env_test"
+    assert created.id == "sesn_1"
+    assert kwargs["metadata"] == {
+        "application": config.app_name,
+        "controller": "a2a-cma",
+        "a2a_context_id": "context_1",
+        "a2a_creation_message_id": "message_1",
+    }
+    assert "owner_id" not in kwargs["metadata"] and "surface" not in kwargs["metadata"]
+    assert managed.find_controller_session("context_1", "message_1").id == "sesn_1"
+    assert len(managed.list_events("sesn_1")) == 150
+
+
 @pytest.mark.parametrize(
     ("field", "message"),
     [("agent_id", "Missing Claude agent ID"), ("environment_id", "Missing Claude environment ID")],
@@ -94,3 +128,11 @@ def test_event_listing_and_streaming(config) -> None:
 def test_missing_managed_agent_identifiers_fail_clearly(config, field, message) -> None:
     with pytest.raises(RuntimeError, match=message):
         ManagedAgentClient(config.model_copy(update={field: ""}), raw_client())
+
+
+@pytest.mark.parametrize("version", [None, 0, -1, True, 1.5, "7"])
+def test_invalid_agent_version_fails_before_sdk_use(config, version) -> None:
+    raw = raw_client()
+    with pytest.raises(RuntimeError, match="Claude agent version"):
+        ManagedAgentClient(config.model_copy(update={"agent_version": version}), raw)
+    raw.beta.sessions.create.assert_not_called()

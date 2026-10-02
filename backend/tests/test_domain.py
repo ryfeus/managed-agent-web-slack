@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from managed_agents_app.domain import SlackMessageReceived, SlackProjectionRequested, SlackWorkStarted
+from managed_agents_app.domain import SlackMessageReceived, SlackTaskProjectionRequested, SlackWorkStarted
 
 
 def test_event_boundary_preserves_v1_camel_case_contract() -> None:
@@ -32,31 +32,32 @@ def test_event_boundary_preserves_v1_camel_case_contract() -> None:
     }
 
 
-def test_projection_contract_accepts_existing_eventbridge_payload() -> None:
-    detail = SlackProjectionRequested.model_validate(
+def test_projection_contract_accepts_task_eventbridge_payload() -> None:
+    detail = SlackTaskProjectionRequested.model_validate(
         {
             "version": 1,
             "requestId": "Ev1",
-            "sessionId": "sesn_1",
+            "threadId": "thread-1",
+            "taskId": "task-1",
             "bindingId": "binding-1",
             "teamId": "T1",
             "channelId": "C1",
             "threadTs": "1.0",
             "userId": "U1",
-            "inputEventId": "evt_1",
         }
     )
-    assert detail.session_id == "sesn_1"
-    assert detail.boundary()["inputEventId"] == "evt_1"
+    assert detail.thread_id == "thread-1"
+    assert detail.boundary()["taskId"] == "task-1"
     assert detail.source_message_ts is None
 
 
 def test_projection_contract_accepts_source_timestamp() -> None:
-    detail = SlackProjectionRequested.model_validate(
+    detail = SlackTaskProjectionRequested.model_validate(
         {
             "version": 1,
             "requestId": "Ev1",
-            "sessionId": "sesn_1",
+            "threadId": "thread-1",
+            "taskId": "task-1",
             "bindingId": "binding-1",
             "teamId": "T1",
             "channelId": "C1",

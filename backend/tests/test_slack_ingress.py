@@ -50,6 +50,36 @@ def test_signed_event_is_emitted_and_replay_window_is_enforced(runtime, monkeypa
     assert stale["statusCode"] == 401
 
 
+def test_signed_user_token_bot_event_needs_exact_configured_pair(runtime) -> None:
+    runtime.config = runtime.config.model_copy(
+        update={"slack_user_bot_id": "B_USER", "slack_user_app_id": "A_USER"}
+    )
+    payload = {
+        "type": "event_callback",
+        "event_id": "EvUserBot",
+        "team_id": "T1",
+        "event": {
+            "type": "app_mention",
+            "user": "U1",
+            "channel": "C1",
+            "ts": "1",
+            "text": "<@UBOT> hello",
+            "bot_id": "B_USER",
+            "app_id": "A_USER",
+        },
+    }
+    event = signed_event(json.dumps(payload), "slack-secret")
+    accepted = slack_ingress.handle_request(runtime, event)
+    assert accepted["statusCode"] == 200
+    runtime.events.publish.assert_called_once()
+    assert runtime.events.publish.call_args.args[1] == "SlackMessageReceived"
+    runtime.events.publish.reset_mock()
+    payload["event"]["app_id"] = "A_OTHER"
+    ignored = slack_ingress.handle_request(runtime, signed_event(json.dumps(payload), "slack-secret"))
+    assert ignored["statusCode"] == 200
+    runtime.events.publish.assert_not_called()
+
+
 def test_malformed_and_signed_interaction_payloads(runtime, monkeypatch, config) -> None:
     emitted = []
     monkeypatch.setattr(slack_ingress, "load_config", lambda: config)

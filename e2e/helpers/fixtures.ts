@@ -19,15 +19,15 @@ export const test = base.extend<{
         }, { auto: true }],
 });
 export { expect };
-export async function login(page: Page, sessionId?: string) {
-    await page.goto(sessionId ? `/?session=${sessionId}` : '/');
+export async function login(page: Page, threadId?: string) {
+    await page.goto(threadId ? `/?thread=${threadId}` : '/');
     await page.locator('input[type=password]').fill('e2e-access-token');
     await page.getByRole('button', { name: 'Continue', exact: true }).click();
     await expect(page.getByPlaceholder('Message Claude…')).toBeVisible();
 }
 export async function send(page: Page, text: string) {
     await page.getByPlaceholder('Message Claude…').fill(text);
-    const accepted = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/messages'));
+    const accepted = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith('/api/agui'));
     await page.getByRole('button', { name: 'Send', exact: true }).click();
-    expect((await accepted).status()).toBe(202);
+    expect((await accepted).status()).toBe(200);
 }

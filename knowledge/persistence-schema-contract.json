@@ -17,71 +17,126 @@
       "external_user_id",
       "created_at"
     ],
-    "agent_sessions": [
-      "session_id",
+    "agent_threads": [
+      "thread_id",
       "principal_id",
+      "creation_request_id",
       "agent_id",
-      "environment_id",
-      "created_by_surface",
+      "context_id",
+      "context_state",
+      "context_init_claim_id",
+      "context_init_lease_expires_at",
+      "title",
+      "last_task_id",
+      "last_task_state",
       "created_at",
+      "updated_at",
       "archived_at"
     ],
-    "surface_bindings": [
+    "thread_surface_bindings": [
       "binding_id",
-      "session_id",
+      "thread_id",
       "surface",
       "tenant_id",
       "external_thread_id",
       "created_at"
     ],
-    "ingress_events": [
-      "ingress_id",
-      "surface",
-      "external_event_id",
-      "status",
-      "session_id",
-      "managed_event_id",
-      "attempts",
-      "lease_expires_at",
-      "last_error",
+    "agent_tasks": [
+      "task_binding_id",
+      "thread_id",
+      "agent_id",
+      "client_message_id",
+      "task_id",
+      "submission_status",
+      "last_seen_task_state",
       "created_at",
       "updated_at"
     ],
-    "projection_events": [
-      "binding_id",
-      "managed_event_id",
+    "cma_clarification_requests": [
+      "request_id",
+      "task_id",
+      "cma_event_id",
+      "kind",
       "status",
-      "attempts",
-      "lease_expires_at",
-      "last_error",
-      "slack_message_ts",
-      "projected_at"
+      "answer_object_key",
+      "response_attempted_at",
+      "created_at",
+      "updated_at",
+      "resolved_at"
     ],
-    "agent_feedback": [
-      "feedback_id",
-      "interaction_id",
-      "principal_id",
-      "session_id",
-      "managed_event_id",
-      "surface",
-      "external_message_id",
-      "rating",
-      "reason",
-      "created_at"
-    ],
-    "slack_response_streams": [
-      "binding_id",
-      "request_event_id",
-      "session_id",
-      "status",
-      "slack_message_ts",
-      "last_managed_event_id",
-      "final_managed_event_id",
-      "attempts",
-      "lease_expires_at",
-      "last_error",
+    "cma_contexts": [
+      "context_id",
+      "creation_message_id",
+      "cma_session_id",
+      "lifecycle_state",
+      "next_sequence",
+      "active_task_id",
+      "scheduler_claim_id",
+      "scheduler_lease_expires_at",
       "created_at",
       "updated_at"
+    ],
+    "cma_tasks": [
+      "task_id",
+      "context_id",
+      "message_id",
+      "sequence",
+      "a2a_state",
+      "internal_state",
+      "cma_input_event_id",
+      "input_object_key",
+      "cma_predecessor_event_id",
+      "cma_terminal_event_id",
+      "dispatch_attempts",
+      "dispatch_attempted_at",
+      "next_dispatch_at",
+      "cancel_requested_at",
+      "cancel_attempted_at",
+      "held_reason",
+      "created_at",
+      "updated_at"
+    ],
+    "cma_input_requests": [
+      "request_id",
+      "task_id",
+      "cma_event_id",
+      "kind",
+      "status",
+      "decision",
+      "decision_reason_object_key",
+      "confirmation_attempted_at",
+      "created_at",
+      "updated_at",
+      "resolved_at"
+    ],
+    "cma_push_configs": [
+      "task_id", "config_id", "url", "last_delivered_fingerprint", "attempt_count",
+      "next_attempt_at", "last_attempt_at", "last_delivered_at", "delivery_claim_id",
+      "delivery_lease_expires_at", "permanent_failure_at", "deleted_at", "created_at", "updated_at"
+    ],
+    "a2a_task_event_receipts": [
+      "receipt_id", "agent_id", "task_id", "thread_id", "context_id", "delivery_id",
+      "event_kind", "observed_task_state", "received_at", "published_at"
+    ],
+    "a2a_task_observation_claims": [
+      "agent_id", "task_id", "claim_id", "lease_expires_at"
+    ],
+    "surface_ingress_events": [
+      "ingress_id", "surface", "external_event_id", "status", "thread_id", "task_id",
+      "attempts", "claim_id", "lease_expires_at", "last_error", "created_at", "updated_at"
+    ],
+    "slack_task_projections": [
+      "binding_id", "task_id", "request_event_id", "source_message_ts", "initiator_user_id",
+      "status", "slack_message_ts", "last_task_state", "attempts", "claim_id",
+      "lease_expires_at", "last_error", "created_at", "updated_at"
+    ],
+    "slack_projection_items": [
+      "binding_id", "task_id", "item_kind", "item_id", "status", "attempts", "claim_id",
+      "lease_expires_at", "last_error", "slack_message_ts", "projected_at"
+    ],
+    "thread_feedback": [
+      "feedback_id", "interaction_id", "principal_id", "thread_id", "task_id",
+      "message_id", "surface", "external_message_id", "rating", "reason", "created_at"
     ]
   }
 }

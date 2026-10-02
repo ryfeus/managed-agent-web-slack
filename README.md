@@ -1,14 +1,14 @@
 # Managed Agent Web + Slack
 
-A reference implementation for continuing the same Anthropic Managed Agent session
+A reference implementation for continuing the same application conversation
 across an assistant-ui web application and Slack. It deploys as an AWS serverless
 application and keeps its application-side state deliberately small.
 
 This is a reference implementation and is not an official Anthropic, Slack, AWS,
 or assistant-ui project.
 
-> Anthropic is the canonical conversation and execution store. Aurora DSQL stores
-> identity, authorization, routing, idempotency, and projection metadata—not a
+> Anthropic is the canonical conversation and execution store behind the A2A controller. Aurora DSQL stores
+> identity, authorization, routing, idempotency, projection metadata, and opaque temporary-object keys—not a
 > duplicate transcript, tool output, or reasoning record.
 
 ## Architecture
@@ -21,24 +21,24 @@ flowchart LR
   Edge --> API["API Gateway"]
 
   API --> WebAPI["web-api Lambda"]
-  API --> Stream["web-stream Lambda"]
+  API --> Bridge["agui-bridge Lambda"]
   API --> Ingress["Slack ingress Lambda"]
   API --> Webhook["Anthropic webhook Lambda"]
 
   Ingress --> Bus["EventBridge"]
-  Webhook --> Bus
+  Webhook --> A2A
   Bus --> Queue["SQS agent-input queue"]
   Queue --> Input["agent-input Lambda"]
   Bus --> Projector["Slack projector Lambda"]
 
   WebAPI <--> DSQL["Aurora DSQL\nidentity · authorization · routing · receipts"]
-  Stream --> DSQL
+  Bridge --> DSQL
   Input <--> DSQL
   Projector <--> DSQL
-  WebAPI <--> Claude["Anthropic Managed Agent\ncanonical transcript + execution"]
-  Stream --> Claude
-  Input --> Claude
-  Projector --> Claude
+  Bridge --> A2A["Private A2A controller"]
+  Input --> A2A
+  Projector --> A2A
+  A2A --> Claude["Anthropic Managed Agent\ncanonical transcript + execution"]
   Projector --> Slack
 ```
 
@@ -71,10 +71,12 @@ opt-in live smoke tests.
 ## Deploy with real providers
 
 Real deployment requires an AWS account and usable credentials, Terraform,
-Anthropic Managed Agent IDs and API credentials, and a Slack app. Copy
-`.env.example` to an untracked `.env` and set `CLAUDE_AGENT_ID`,
-`CLAUDE_ENVIRONMENT_ID`, `ANTHROPIC_API_KEY`, `WEB_ACCESS_TOKEN`, and
-`WEB_COOKIE_SECRET`; `AGENT_ID` is only a compatibility alias.
+ant CLI >= 1.30.0, Anthropic credentials for the lockfile's workspace, and a Slack
+app. Copy `.env.example` to an untracked `.env` and set `ANTHROPIC_API_KEY`,
+`WEB_ACCESS_TOKEN`, and `WEB_COOKIE_SECRET`. Agent/environment definitions and
+identity live in [cma/](cma/README.md); deployment derives IDs and an exact agent
+version from its committed lockfile. For a fresh workspace, follow the bootstrap
+and existing-resource migration procedure before deploying.
 
 `AWS_PROFILE` and `AWS_REGION` select the target. `EXPECTED_AWS_ACCOUNT_ID` is
 an optional safety assertion. Remote state is rendered under `.generated/` using
@@ -83,11 +85,13 @@ existing deployment.
 
 ```bash
 aws sso login --profile default
+npm run cma:plan
 ./scripts/deploy.sh
 npm run slack:manifest
 ```
 
-The wrapper validates deployment settings, discovers the target account, bootstraps
+The wrapper validates deployment settings, discovers the target account, applies
+the CMA definitions without force/prune, resolves the updated version pin, bootstraps
 remote state when necessary, deploys, syncs secrets to Secrets Manager, migrates
 and seeds DSQL, uploads the frontend, and renders a Slack manifest. Import the
 generated `.generated/slack-manifest.yaml`, keep Socket Mode disabled, then
@@ -101,11 +105,15 @@ endpoint, and resource names. See [operations](docs/operations.md),
 [Managed Agent setup](docs/managed-agent-setup.md), [Slack setup](docs/slack-setup.md),
 and [DSQL operations](docs/dsql.md) for the full lifecycle.
 
+Review and commit any `cma/claude-lock.json` update after deployment, including
+partial failures. Agent sessions are version-pinned; environments are selected by
+ID, so environment changes can affect subsequent sessions before AWS rollout.
+
 ## Slack experience
 
 The generated manifest configures Agent View, Events API delivery, signed
-interactivity, shortcuts, and session-link unfurls. The application supports
-authorized web/Slack session continuity, streaming task cards, source links,
+interactivity, shortcuts, and thread-link unfurls. The application supports
+authorized web/Slack conversation continuity, streaming task cards, source links,
 exact-message receipt reactions, tool approvals, feedback, and thread replies;
 each Slack capability is separately feature-gated and defaults off.
 

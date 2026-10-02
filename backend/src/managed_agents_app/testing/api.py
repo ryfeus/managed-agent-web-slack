@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Body
@@ -7,8 +8,7 @@ from psycopg import sql
 
 from managed_agents_app.db.connection import connect
 from managed_agents_app.runtime import Runtime
-from managed_agents_app.testing.factory import validate_local_database
-from managed_agents_app.testing.fake_agent import FakeManagedAgent
+from managed_agents_app.testing.factory import LocalA2AHarness, validate_local_database
 from managed_agents_app.testing.faults import FaultInjector
 from managed_agents_app.testing.local_event_bus import LocalEventBus
 from managed_agents_app.testing.local_queue import LocalQueue
@@ -17,34 +17,39 @@ from managed_agents_app.testing.recording_slack import RecordingSlack
 TABLES = (
     "principals",
     "external_identities",
-    "agent_sessions",
-    "surface_bindings",
-    "ingress_events",
-    "projection_events",
-    "agent_feedback",
-    "slack_response_streams",
+    "agent_threads",
+    "thread_surface_bindings",
+    "agent_tasks",
+    "cma_contexts",
+    "cma_tasks",
+    "cma_input_requests",
+    "cma_clarification_requests",
+    "cma_push_configs",
+    "a2a_task_event_receipts",
+    "a2a_task_observation_claims",
+    "surface_ingress_events",
+    "slack_task_projections",
+    "slack_projection_items",
+    "thread_feedback",
 )
 
 
 def router(runtime: Runtime) -> APIRouter:
     validate_local_database(runtime.config)
     api = APIRouter(prefix="/_test")
-    agent = cast(FakeManagedAgent, runtime.agent)
     slack = cast(RecordingSlack, runtime.slack)
     bus = cast(LocalEventBus, runtime.events)
     queue = cast(LocalQueue, bus.agent_input_queue)
     faults = cast(FaultInjector, runtime.faults)
+    harness = cast(LocalA2AHarness, runtime.local_a2a)
 
     @api.post("/reset")
     def reset() -> dict[str, bool]:
         validate_local_database(runtime.config)
         faults.reset()
-        agent.reset()
+        harness.reset()
         bus.reset()
         queue.reset()
-        # Released handlers can finish while drain quiesces. Clear any final
-        # fake mutations they made after cancellation before reseeding state.
-        agent.reset()
         slack.reset()
         with connect(runtime.config) as conn:
             conn.execute(
@@ -66,7 +71,7 @@ def router(runtime: Runtime) -> APIRouter:
                 for table in TABLES
             }
         return {
-            "agent": agent.snapshot(),
+            "a2a": harness.snapshot(),
             "slack": slack.snapshot(),
             "events": bus.snapshot(),
             "queue": queue.snapshot(),
@@ -74,7 +79,7 @@ def router(runtime: Runtime) -> APIRouter:
             "faults": faults.snapshot(),
         }
 
-    @api.post("/agent/script")
+    @api.post("/a2a/script")
     def script(body: Annotated[dict[str, Any], Body()]) -> dict[str, bool]:
         events = body.get(
             "events",
@@ -86,31 +91,25 @@ def router(runtime: Runtime) -> APIRouter:
                 {"type": "session.status_idle", "stop_reason": {"type": "end_turn"}},
             ],
         )
-        agent.script(body["prompt"], events, body.get("automatic", True))
+        harness.provider.script(body["prompt"], events)
         return {"ok": True}
 
-    @api.post("/agent/script-tool-approval")
-    def approval(body: Annotated[dict[str, Any], Body()]) -> dict[str, bool]:
-        agent.approval_scripts[f"{body['tool_id']}:{body['approved']}"] = {
-            "events": body["events"],
-            "automatic": body.get("automatic", True),
-        }
+    @api.post("/a2a/automatic")
+    def a2a_automatic(body: Annotated[dict[str, Any], Body()]) -> dict[str, bool]:
+        harness.provider.automatic = bool(body["enabled"])
         return {"ok": True}
 
-    @api.post("/agent/script-interrupt")
-    def script_interrupt(body: Annotated[dict[str, Any], Body()]) -> dict[str, bool]:
-        agent.interrupt_events = body["events"]
-        return {"ok": True}
+    @api.post("/a2a/emit")
+    def a2a_emit(body: Annotated[dict[str, Any], Body()]) -> dict[str, str]:
+        return {"id": harness.provider.emit(str(body["session_id"]), body["event"])}
 
-    @api.post("/agent/advance")
-    def advance(body: Annotated[dict[str, Any], Body()]) -> dict[str, bool]:
-        agent.advance(body["session_id"], body.get("count"))
-        agent.flush_notifications()
+    @api.post("/a2a/reconcile")
+    async def a2a_reconcile(body: Annotated[dict[str, Any], Body()]) -> dict[str, bool]:
+        context = harness.composition.repository.context_for_session(str(body["session_id"]))
+        if context is None:
+            return {"ok": False}
+        await harness.composition.scheduler.run_once(str(context["context_id"]))
         return {"ok": True}
-
-    @api.post("/agent/emit")
-    def emit(body: Annotated[dict[str, Any], Body()]) -> dict[str, str]:
-        return {"id": agent.emit(body["session_id"], body["event"])}
 
     @api.post("/events/drain")
     def drain(body: Annotated[dict[str, Any] | None, Body()] = None) -> dict[str, Any]:
@@ -118,10 +117,9 @@ def router(runtime: Runtime) -> APIRouter:
         max_events = min(max(int(body.get("max_events", 100)), 1), 1000)
         workers = min(max(int(body.get("workers", 1)), 1), 4)
         for _ in range(20):
-            agent.flush_notifications()
             bus.drain(max_events, workers=workers)
             queue.drain(max_events, workers=workers)
-            agent.flush_notifications()
+            asyncio.run(harness.drain())
             result = bus.snapshot()
             queue_state = queue.snapshot()
             queue_has_visible_messages = any(item["state"] == "visible" for item in queue_state["messages"])
@@ -182,10 +180,6 @@ def router(runtime: Runtime) -> APIRouter:
     @api.get("/events")
     def events() -> dict[str, Any]:
         return bus.snapshot()
-
-    @api.get("/agent/events")
-    def agent_events(session_id: str) -> list[dict[str, Any]]:
-        return agent.list_events(session_id)
 
     @api.get("/slack/{kind}")
     def slack_state(kind: str) -> Any:

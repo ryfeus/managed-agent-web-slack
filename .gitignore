@@ -27,4 +27,3 @@ crash.*.log
 playwright-report/
 playwright-report-production/
 test-results/
-/plans

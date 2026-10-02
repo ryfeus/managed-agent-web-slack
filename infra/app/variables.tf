@@ -1,6 +1,6 @@
 variable "app_name" {
   type    = string
-  default = "managed-agent-web-slack"
+  default = "claude-managed-agents-ui-eda"
 }
 
 variable "environment" {
@@ -17,6 +17,14 @@ variable "claude_agent_id" {
   type = string
 }
 
+variable "claude_agent_version" {
+  type = number
+  validation {
+    condition     = var.claude_agent_version >= 1 && floor(var.claude_agent_version) == var.claude_agent_version
+    error_message = "claude_agent_version must be a positive integer."
+  }
+}
+
 variable "claude_environment_id" {
   type = string
 }
@@ -29,6 +37,18 @@ variable "slack_team_allowlist" {
 
 variable "slack_user_allowlist" {
   description = "Optional development-only Slack user filter; not an authentication credential."
+  type        = string
+  default     = ""
+}
+
+variable "slack_user_bot_id" {
+  description = "Optional exact bot ID for locally posted Slack user smoke messages. Requires slack_user_app_id."
+  type        = string
+  default     = ""
+}
+
+variable "slack_user_app_id" {
+  description = "Optional exact app ID for locally posted Slack user smoke messages. Requires slack_user_bot_id."
   type        = string
   default     = ""
 }
