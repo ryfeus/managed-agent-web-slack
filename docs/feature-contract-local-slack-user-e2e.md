@@ -27,6 +27,7 @@ Slack receives a real user mention and a real same-thread reply. The deployed ap
 - A Slack message carrying `bot_id` is accepted only when its bot and app IDs match the configured pair; only the matched `bot_message` subtype is permitted.
 - The helper neither writes DSQL data nor stores transcripts or provider events.
 - Only messages attributable to the authenticated bot may satisfy response markers.
+- For block messages, markers must appear in visible content; notification fallback text cannot satisfy acceptance or hide a missing answer.
 
 ## Failure semantics
 

@@ -211,6 +211,78 @@ def test_approval_reason_and_competing_response(local):
     assert any("already resolved" in str(item["text"]) for item in local.slack.messages.values())
 
 
+@pytest.mark.parametrize("streaming", [True, False])
+def test_approval_resume_posts_one_visible_answer(local, streaming):
+    local.config = local.config.model_copy(
+        update={"slack_streaming_enabled": streaming, "slack_task_cards_enabled": streaming}
+    )
+    local.local_a2a.provider.script(
+        "fetch",
+        [
+            {
+                "id": "private-tool",
+                "type": "agent.tool_use",
+                "name": "web_fetch",
+                "input": {"url": "https://example.test"},
+            },
+            {
+                "type": "session.status_idle",
+                "stop_reason": {"type": "requires_action", "event_ids": ["private-tool"]},
+            },
+        ],
+    )
+    signed(local, mention("fetch"))
+    drain(local)
+    approval = next(
+        item for item in local.slack.messages.values() if "agent_tool_allow" in json.dumps(item.get("blocks"))
+    )
+    assert rows(local, "cma_tasks")[0]["a2a_state"] == "INPUT_REQUIRED"
+    assert not any(item["text"] == "Done" for item in local.slack.messages.values())
+    signed(
+        local,
+        {
+            "type": "block_actions",
+            "team": {"id": "T001"},
+            "user": {"id": "U001"},
+            "channel": {"id": "C001"},
+            "trigger_id": "trigger",
+            "message": {"ts": approval["ts"], "thread_ts": "100.000001"},
+            "actions": [
+                {"action_id": "agent_tool_allow", "value": approval["blocks"][1]["elements"][0]["value"]}
+            ],
+        },
+        interaction=True,
+    )
+    drain(local)
+    assert local.local_a2a.provider.confirm_calls == 1
+    assert rows(local, "cma_tasks")[0]["a2a_state"] == "COMPLETED"
+    answers = [item for item in local.slack.messages.values() if item["text"] == "Done"]
+    assert len(answers) == 1
+    answer = answers[0]
+    assert answer["thread_ts"] == "100.000001"
+    assert "".join(b["text"]["text"] for b in answer["blocks"] if b["type"] == "section") == "Done"
+    assert any(b["type"] == "context_actions" for b in answer["blocks"])
+    assert any(b["type"] == "context" for b in answer["blocks"])
+    assert "agent_tool_allow" not in json.dumps(local.slack.messages[approval["ts"]])
+    thread = rows(local, "agent_threads")[0]
+    current = rows(local, "agent_tasks")[0]
+    local.events.publish(
+        "app.a2a",
+        "A2ATaskUpdated",
+        {
+            "deliveryId": str(uuid4()),
+            "agentId": "cma",
+            "threadId": str(thread["thread_id"]),
+            "taskId": current["task_id"],
+            "contextId": thread["context_id"],
+            "eventKind": "task",
+            "taskState": "COMPLETED",
+        },
+    )
+    drain(local)
+    assert [item for item in local.slack.messages.values() if item["text"] == "Done"] == answers
+
+
 def test_task_update_projects_to_every_slack_binding(local):
     signed(local, mention("hello"))
     drain(local)

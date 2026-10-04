@@ -20,7 +20,9 @@ SPEC.loader.exec_module(slack_user)
 
 
 def message(ts, user, text, root="1.0", bot_id=None):
-    return {"ts": ts, "user": user, "bot_id": bot_id, "text": text, "block_text": "", "thread_ts": root}
+    return slack_user.normalize_message(
+        {"ts": ts, "user": user, "bot_id": bot_id, "text": text, "thread_ts": root}, root
+    )
 
 
 def state():
@@ -99,14 +101,14 @@ def test_marker_requires_bot_identity_and_exactly_one_visible_occurrence():
     messages.append(message("1.4", "U2", "ACK_test"))
     with pytest.raises(slack_user.SmokeFailure, match="More than one"):
         slack_user.marker_matches(messages, "ACK_test", "1.0", "U1", "U2", None)
-    messages[-1]["text"] = "ACK_test ACK_test"
+    messages[-1]["content"] = "ACK_test ACK_test"
     with pytest.raises(slack_user.SmokeFailure, match="repeats"):
         slack_user.marker_matches(messages, "ACK_test", "1.0", "U1", "U2", None)
 
 
 def test_marker_accepts_known_bot_id_and_block_text():
     candidate = message("1.1", None, "")
-    candidate.update(bot_id="B2", block_text="ACK_test")
+    candidate.update(bot_id="B2", block_text="ACK_test", content="ACK_test")
     assert slack_user.marker_matches([candidate], "ACK_test", "1.0", "U1", "U2", "B2") == [candidate]
 
 
@@ -114,6 +116,37 @@ def test_streamed_markdown_text_is_normalized():
     candidate = slack_user.normalize_message(
         {"ts": "1.1", "user": "U2", "text": "Working", "markdown_text": "ACK_test"}, "1.0"
     )
+    assert slack_user.marker_matches([candidate], "ACK_test", "1.0", "U1", "U2", None) == [candidate]
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        [{"type": "context_actions", "elements": []}],
+        [{"type": "context", "elements": [{"type": "mrkdwn", "text": "Original message"}]}],
+    ],
+)
+def test_notification_text_cannot_satisfy_visible_response_marker(blocks):
+    candidate = slack_user.normalize_message(
+        {"ts": "1.1", "user": "U2", "text": "ACK_test", "blocks": blocks}, "1.0"
+    )
+    assert "ACK_test" not in candidate["content"]
+    assert slack_user.marker_matches([candidate], "ACK_test", "1.0", "U1", "U2", None) == []
+
+
+def test_visible_blocks_win_over_notification_fallback_without_double_counting():
+    candidate = slack_user.normalize_message(
+        {
+            "ts": "1.1",
+            "user": "U2",
+            "text": "ACK_test",
+            "blocks": [
+                {"type": "section", "text": {"type": "mrkdwn", "text": "ACK_test"}},
+            ],
+        },
+        "1.0",
+    )
+    assert candidate["content"] == "ACK_test"
     assert slack_user.marker_matches([candidate], "ACK_test", "1.0", "U1", "U2", None) == [candidate]
 
 

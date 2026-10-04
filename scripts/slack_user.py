@@ -146,12 +146,14 @@ def normalize_message(value: Any, root_ts: str) -> dict[str, Any]:
     attachments = visible_block_text(value.get("attachments", []))
     markdown = value.get("markdown_text") if isinstance(value.get("markdown_text"), str) else ""
     alternate = "\n".join(part for part in (blocks, chunks, attachments, markdown) if part)
+    body = blocks if value.get("blocks") else chunks or markdown or text
     return {
         "ts": str(value["ts"]),
         "user": value.get("user"),
         "bot_id": value.get("bot_id"),
         "text": text,
-        "content": text or alternate,
+        # Block messages render their blocks, not the notification fallback in text.
+        "content": "\n".join(part for part in (body, attachments) if part),
         "block_text": alternate,
         "thread_ts": str(value.get("thread_ts") or root_ts),
     }
@@ -175,9 +177,7 @@ def marker_matches(
             not agent_bot_id or message.get("bot_id") != agent_bot_id
         ):
             continue
-        text = str(message.get("text") or "")
-        block_text = str(message.get("block_text") or "")
-        content = text if marker in text else block_text
+        content = str(message["content"])
         if marker in content:
             if content.count(marker) != 1:
                 raise SmokeFailure("slack_projection", f"Agent message repeats {marker}")

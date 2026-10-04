@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from a2a.types import a2a_pb2 as a2a
 
 from managed_agents_app.db.slack_a2a_repository import Claim
@@ -139,3 +140,35 @@ def test_push_projects_to_each_slack_binding(config, monkeypatch):
     slack_projector.handle_domain_event(runtime, event)
     assert runtime.slack.post_reply.call_count == 2
     assert runtime.slack_a2a.ensure_projection.call_count == 2
+
+
+@pytest.mark.parametrize("feedback,source_link", [(True, False), (False, True), (True, True), (False, False)])
+@pytest.mark.parametrize("answer", ["answer", ("long answer " * 600).strip()], ids=["short", "long"])
+def test_nonstreamed_answer_is_visible_with_optional_blocks(
+    config, monkeypatch, feedback, source_link, answer
+):
+    runtime, _ = make_runtime(config, monkeypatch)
+    runtime.config = runtime.config.model_copy(update={"slack_feedback_enabled": feedback})
+    current = task()
+    current.history[0].parts[0].text = answer
+    slack_projector._project_task(
+        runtime,
+        runtime.slack,
+        "binding-1",
+        "task-1",
+        "C1",
+        "1.0",
+        current,
+        permalink="https://slack.test/source" if source_link else None,
+    )
+    _, _, fallback, blocks = runtime.slack.post_reply.call_args.args
+    assert fallback == answer
+    if blocks:
+        sections = [block for block in blocks if block["type"] == "section"]
+        assert "".join(block["text"]["text"] for block in sections) == answer
+        assert all(0 < len(block["text"]["text"]) <= 3000 for block in sections)
+        assert blocks[0]["type"] == "section"
+        assert any(block["type"] == "context_actions" for block in blocks) == feedback
+        assert any(block["type"] == "context" for block in blocks) == source_link
+    else:
+        assert not feedback and not source_link

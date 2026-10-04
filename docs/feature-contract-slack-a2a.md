@@ -12,6 +12,12 @@ Web migration, public or private production A2A ingress activation, legacy table
 
 Mentions, enabled DMs and bound replies, shortcuts, approvals, stop, feedback, and thread links retain their Slack behavior. Task cards stream complete A2A agent Messages rather than provider text deltas. A Task ending restores active Agent View state without closing the reusable thread.
 
+After a tool approval resumes a suspended Task, the final reply must contain the
+answer in the Slack thread as well as its notification. Any non-streamed answer
+with feedback or source-link blocks includes visible text sections before those
+blocks, each within Slack's 3,000-character section limit. Plain replies without
+blocks continue to use top-level text. Streamed replies retain their existing mode.
+
 ## Inputs
 
 Signed Slack HTTP events and interactions become normalized domain events. `A2ATaskUpdated` is a metadata-only wake-up; the projector fetches the current Task.
@@ -61,6 +67,9 @@ Web remains legacy/direct-CMA until Phase 5. Thread links and `?thread=` unfurls
 | Input, duplicate, and lost-response idempotency | Postgres Slack A2A integration |
 | Live/push race and subscription fallback | Postgres Slack A2A integration |
 | Approval, denial reason, and response race | Postgres Slack A2A integration |
+| Visible final answer after Allow with streaming on or off; duplicate completion | `test_approval_resume_posts_one_visible_answer` |
+| Visible non-streamed answer with feedback/source links and long text | `test_nonstreamed_answer_is_visible_with_optional_blocks` |
+| Real Slack mention, exact tool input, signed Allow, visible Slack and Web answer | Opt-in `e2e/live/slack-approval.spec.ts` |
 | Stop, shortcuts, feedback, links, and multi-binding | Postgres Slack A2A integration and Playwright Slack suite |
 | No provider import or transcript persistence | Architecture and persistence rails |
 | Web and controller regression | `./scripts/verify --full` |
@@ -68,6 +77,16 @@ Web remains legacy/direct-CMA until Phase 5. Thread links and `?thread=` unfurls
 ## Live-contract requirements
 
 Real Slack and deployed private A2A connectivity remain to be verified during private-control-plane activation. Local ASGI and recording-gateway tests do not establish real-provider compatibility.
+
+Approval acceptance must inspect the final Slack message's visible blocks;
+notification fallback text alone cannot establish that the answer is visible.
+
+On 2026-10-03, the focused `slack-approval.spec.ts` passed against the developer
+sandbox after deployment. A genuine user-token mention reached a pending
+`web_fetch` for `https://example.com`; a signed Allow interaction resumed that same
+Task. The final reply appeared once in Slack with `section`, `context_actions`,
+and `context` blocks, and once in canonical Web history. Bot-token reads verified
+the Slack payload; this run did not exercise the Slack client's button UI.
 
 ## Known limitations
 

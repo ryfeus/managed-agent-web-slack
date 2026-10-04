@@ -244,6 +244,15 @@ infrastructure.
 
 ## Local real Slack user smoke
 
+For a focused tool-approval check, run
+`npm run e2e:live -- slack-approval.spec.ts` with the same live configuration plus
+`SLACK_USER_TOKEN`. This posts one genuine user mention, uses `SLACK_BOT_TOKEN`
+to read the approval and final reply, independently checks the canonical tool
+name and complete input, and submits Allow through the existing signed interaction
+fixture. It verifies one completed Task and an answer in both visible Slack blocks
+and Web history. It does not exercise a Slack client's button click. Notification
+fallback text alone cannot satisfy the visible-answer assertion.
+
 `npm run e2e:slack-user` is a separate, local-only smoke. It reads the existing
 `SLACK_USER_TOKEN` and `SLACK_BOT_TOKEN` from `.env` (unless already exported),
 posts a real user-authored mention, then posts an unmentioned continuation in the

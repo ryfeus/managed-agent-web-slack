@@ -8,6 +8,14 @@ def markdown_text_chunk(text: str) -> dict[str, Any]:
     return {"type": "markdown_text", "text": text}
 
 
+def response_text_blocks(text: str) -> list[dict[str, Any]]:
+    """Keep the answer visible when postMessage also includes controls or context."""
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": text[start : start + 3000]}}
+        for start in range(0, len(text), 3000)
+    ]
+
+
 def working_task_chunk(request_id: str, permalink: str | None = None) -> dict[str, Any]:
     chunk: dict[str, Any] = {
         "type": "task_update",

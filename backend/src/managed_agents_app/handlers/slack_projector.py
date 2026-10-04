@@ -35,6 +35,7 @@ from managed_agents_app.slack.blocks import (
     completed_task_chunk,
     feedback_blocks,
     markdown_text_chunk,
+    response_text_blocks,
     source_link_blocks,
     tool_approval_blocks,
     working_task_chunk,
@@ -254,6 +255,9 @@ def _project_task(
                     else []
                 )
                 blocks += source_link_blocks(permalink)
+                if blocks:
+                    # With blocks, top-level text is only the notification/accessibility fallback.
+                    blocks = response_text_blocks(text) + blocks
                 message_ts = slack.post_reply(channel_id, thread_ts, text, blocks or None)
             repo.finish_item(
                 binding_id, task_id, "agent_message", message.message_id, claim.token, message_ts
