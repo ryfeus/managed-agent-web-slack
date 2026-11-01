@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator, Callable
 from typing import Any, Protocol
 
 from managed_agents_app.managed_agent.client import ManagedAgentClient
 from managed_agents_app.models import SessionSummary
+from managed_agents_app.observability import blocking
 
 
 class CmaProvider(Protocol):
@@ -34,7 +34,7 @@ class DefinitiveProviderError(RuntimeError):
 
 async def _invoke[T](operation: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     try:
-        return await asyncio.to_thread(operation, *args, **kwargs)
+        return await blocking("provider_" + operation.__name__, operation, *args, **kwargs)
     except Exception as error:
         status = getattr(error, "status_code", None)
         if isinstance(status, int) and 400 <= status < 500 and status not in {408, 409, 429}:
@@ -98,6 +98,6 @@ class AnthropicCmaProvider:
             except StopIteration:
                 return sentinel
 
-        while (item := await asyncio.to_thread(next_event)) is not sentinel:
+        while (item := await blocking("provider_stream_next", next_event)) is not sentinel:
             assert isinstance(item, dict)
             yield item

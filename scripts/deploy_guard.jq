@@ -1,5 +1,11 @@
 .resource_changes[]?
 | select((.change.actions | index("delete")) != null)
+# Phase 2 retires only these disabled push-maintenance resources, never replacements.
+| select(.change.actions != ["delete"] or (.address as $address | [
+    "aws_cloudwatch_event_rule.cma_push_maintenance",
+    "aws_cloudwatch_event_target.cma_push_maintenance",
+    "aws_lambda_permission.cma_push_maintenance"
+  ] | index($address) == null))
 # Phase 4 and Phase 5 retirements are reviewed exact addresses. API deployments are immutable snapshots.
 | select(.address as $address | [
     "aws_cloudwatch_event_rule.session_changed",

@@ -17,6 +17,7 @@ from managed_agents_app.cma_controller.push_trigger import PushTrigger
 from managed_agents_app.cma_controller.runtime_repository import ControllerRuntimeRepository
 from managed_agents_app.cma_controller.task_view import TaskViewOptions, build_task
 from managed_agents_app.cma_controller.trigger import SchedulerTrigger
+from managed_agents_app.observability import blocking, task_scope
 from managed_agents_app.protocols.controller_profile import HUMAN_INPUT_EXTENSION_URI
 from managed_agents_app.protocols.human_input import (
     ClarificationResponse,
@@ -136,37 +137,12 @@ class ControllerService:
                 raise InvalidParamsError("Unknown clarification request")
             await asyncio.to_thread(self.trigger.schedule, message.context_id, "human-input")
             return await self.get_task(message.task_id, options=options)
-        if task["internal_state"] != "input_required":
-            prior = await asyncio.to_thread(
-                self.repository.get_input_request, response.request_id, message.task_id
-            )
-            if prior and prior["decision"] != response.decision:
-                raise InvalidParamsError("Input request was resolved with a different decision")
-            if prior and prior["status"] != "pending" and prior["decision"] == response.decision:
-                return await self.get_task(message.task_id, options=options)
-            raise InvalidParamsError("Task is not waiting for human input")
-        reason_key = str(uuid.uuid4()) if response.reason else None
-        if reason_key:
-            await asyncio.to_thread(self.pending_input.put, reason_key, response.reason or "")
-        try:
-            row = await asyncio.to_thread(
-                self.repository.decide_input_request,
-                response.request_id,
-                message.task_id,
-                response.decision,
-                reason_key,
-            )
-        except Exception:
-            if reason_key:
-                await asyncio.to_thread(self.pending_input.delete, reason_key)
-            raise
-        if reason_key and (row is None or row["decision_reason_object_key"] != reason_key):
-            await asyncio.to_thread(self.pending_input.delete, reason_key)
-        if row is None:
-            raise InvalidParamsError("Unknown input request")
-        if row["decision"] != response.decision:
-            raise InvalidParamsError("Input request was resolved with a different decision")
-        await asyncio.to_thread(self.trigger.schedule, message.context_id, "human-input")
+        accepted = await asyncio.to_thread(
+            self.repository.record_human_ruling, response.request_id, message.task_id, response.decision
+        )
+        if not accepted:
+            raise InvalidParamsError("Unknown, stale, or conflicting OpenAPPA review")
+        await asyncio.to_thread(self.trigger.schedule, message.context_id, "human-review")
         return await self.get_task(message.task_id, options=options)
 
     async def get_task(
@@ -176,22 +152,30 @@ class ControllerService:
         *,
         options: TaskViewOptions | None = None,
     ) -> a2a.Task:
+        with task_scope(task_id):
+            return await self._get_task(task_id, history_length, options=options)
+
+    async def _get_task(
+        self, task_id: str, history_length: int | None = None, *, options: TaskViewOptions | None = None
+    ) -> a2a.Task:
         view = self._view_options(history_length, options)
-        task = await asyncio.to_thread(self.repository.get_task, task_id)
+        task = await blocking("repository_task_read", self.repository.get_task, task_id)
         if task is None:
             raise TaskNotFoundError()
         pending_text = None
         if not task.get("cma_input_event_id") and task.get("input_object_key"):
             key = str(task["input_object_key"])
             try:
-                pending_text = await asyncio.to_thread(self.pending_input.get, key)
+                pending_text = await blocking("pending_input_read", self.pending_input.get, key)
             except Exception:
                 # The scheduler can bind the CMA event and remove the object between reads.
                 refreshed = await asyncio.to_thread(self.repository.get_task, task_id)
                 if refreshed is None or refreshed.get("input_object_key") == key:
                     raise
                 task = refreshed
-        context = await asyncio.to_thread(self.repository.get_context, str(task["context_id"]))
+        context = await blocking(
+            "repository_context_read", self.repository.get_context, str(task["context_id"])
+        )
         if context is None:
             raise TaskNotFoundError()
         events = (
@@ -199,15 +183,31 @@ class ControllerService:
             if context.get("cma_session_id")
             else []
         )
-        requests = await asyncio.to_thread(self.repository.list_input_requests, task_id)
+        requests = await blocking("repository_requests_read", self.repository.list_input_requests, task_id)
+        if view.human_input_enabled and not task.get("cancel_requested_at"):
+            for row in requests:
+                if (
+                    row.get("review_object_key")
+                    and row["status"] == "pending"
+                    and not row.get("human_ruling")
+                ):
+                    row["review_description"] = await blocking(
+                        "review_read", self.pending_input.get, str(row["review_object_key"])
+                    )
         return build_task(task, events, requests, view, pending_text)
 
     async def watch_marker(self, task_id: str) -> tuple[object, str, str | None, str | None]:
         """Read cheap durable state before deciding whether a full CMA replay is needed."""
-        task = await asyncio.to_thread(self.repository.get_task, task_id)
+        with task_scope(task_id):
+            return await self._watch_marker(task_id)
+
+    async def _watch_marker(self, task_id: str) -> tuple[object, str, str | None, str | None]:
+        task = await blocking("repository_task_read", self.repository.get_task, task_id)
         if task is None:
             raise TaskNotFoundError()
-        context = await asyncio.to_thread(self.repository.get_context, str(task["context_id"]))
+        context = await blocking(
+            "repository_context_read", self.repository.get_context, str(task["context_id"])
+        )
         if context is None:
             raise TaskNotFoundError()
         return (

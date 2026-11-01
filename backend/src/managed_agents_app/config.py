@@ -4,6 +4,7 @@ import base64
 import os
 from functools import lru_cache
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 import boto3
 from botocore.exceptions import ClientError
@@ -26,7 +27,12 @@ class AppConfig(BaseModel):
     cma_a2a_push_allowed_url: str = ""
     cma_scheduler_queue_url: str = ""
     cma_push_queue_url: str = ""
+    cma_preview_queue_url: str = ""
+    preview_enabled: bool = False
     cma_pending_input_bucket: str = ""
+    openappa_binary_path: str = ""
+    openappa_policy_path: str = ""
+    openappa_timeout_seconds: float = Field(default=10, gt=0, le=30)
     dsql_endpoint: str
     dsql_database: str
     dsql_role: str
@@ -43,18 +49,25 @@ class AppConfig(BaseModel):
     slack_user_bot_id: str | None = None
     slack_user_app_id: str | None = None
     public_app_url: str = ""
-    slack_bound_thread_replies: bool = False
-    slack_agent_view_enabled: bool = False
-    slack_streaming_enabled: bool = False
-    slack_tool_approvals_enabled: bool = False
-    slack_feedback_enabled: bool = False
-    slack_shortcuts_enabled: bool = False
-    slack_unfurls_enabled: bool = False
-    slack_active_context_enabled: bool = False
-    slack_receipt_reaction_enabled: bool = False
     slack_receipt_reaction: str = "eyes"
-    slack_source_links_enabled: bool = False
-    slack_task_cards_enabled: bool = False
+
+
+def local_cors_origins(config: AppConfig) -> list[str]:
+    origins = ["http://127.0.0.1:3000", "http://localhost:3000"]
+    if config.app_env == "e2e" and config.public_app_url:
+        url = urlsplit(config.public_app_url)
+        if (
+            url.scheme != "http"
+            or url.hostname not in {"127.0.0.1", "localhost"}
+            or url.path
+            or url.query
+            or url.fragment
+            or url.username
+            or url.password
+        ):
+            raise ValueError("E2E frontend origin must be an HTTP loopback origin")
+        origins = [config.public_app_url]
+    return origins
 
 
 def _flag(name: str, default: bool = False) -> bool:
@@ -82,7 +95,7 @@ def _secret(arn_name: str, direct_name: str) -> str | None:
             "SLACK_SIGNING_SECRET": "e2e-slack-secret",
             "SLACK_BOT_TOKEN": "e2e-bot",
             "ANTHROPIC_API_KEY": "e2e-agent",
-            "ANTHROPIC_WEBHOOK_SIGNING_KEY": "whsec_ZTJlLXdlYmhvb2stc2VjcmV0",
+            "ANTHROPIC_WEBHOOK_SIGNING_KEY": "whsec_ZTJlLXdlYmhvb2stc2VjcmV0",  # gitleaks:allow local fake
         }.get(direct_name)
     direct = os.getenv(direct_name)
     if direct:
@@ -118,7 +131,12 @@ def load_config() -> AppConfig:
         cma_a2a_push_allowed_url=os.getenv("CMA_A2A_PUSH_ALLOWED_URL", "").strip(),
         cma_scheduler_queue_url=os.getenv("CMA_SCHEDULER_QUEUE_URL", "").strip(),
         cma_push_queue_url=os.getenv("CMA_PUSH_QUEUE_URL", "").strip(),
+        cma_preview_queue_url=os.getenv("CMA_PREVIEW_QUEUE_URL", "").strip(),
+        preview_enabled=_flag("PREVIEW_ENABLED"),
         cma_pending_input_bucket=os.getenv("CMA_PENDING_INPUT_BUCKET", "").strip(),
+        openappa_binary_path=os.getenv("OPENAPPA_BINARY_PATH", ""),
+        openappa_policy_path=os.getenv("OPENAPPA_POLICY_PATH", ""),
+        openappa_timeout_seconds=float(os.getenv("OPENAPPA_TIMEOUT_SECONDS", "10")),
         dsql_endpoint=os.getenv("DSQL_ENDPOINT", ""),
         dsql_database=os.getenv("DSQL_DATABASE", "postgres"),
         dsql_role=os.getenv("DSQL_ROLE", "app_runtime"),
@@ -137,18 +155,7 @@ def load_config() -> AppConfig:
         slack_user_bot_id=os.getenv("SLACK_USER_BOT_ID") or None,
         slack_user_app_id=os.getenv("SLACK_USER_APP_ID") or None,
         public_app_url=os.getenv("PUBLIC_APP_URL", "").rstrip("/"),
-        slack_bound_thread_replies=_flag("SLACK_BOUND_THREAD_REPLIES"),
-        slack_agent_view_enabled=_flag("SLACK_AGENT_VIEW_ENABLED"),
-        slack_streaming_enabled=_flag("SLACK_STREAMING_ENABLED"),
-        slack_tool_approvals_enabled=_flag("SLACK_TOOL_APPROVALS_ENABLED"),
-        slack_feedback_enabled=_flag("SLACK_FEEDBACK_ENABLED"),
-        slack_shortcuts_enabled=_flag("SLACK_SHORTCUTS_ENABLED"),
-        slack_unfurls_enabled=_flag("SLACK_UNFURLS_ENABLED"),
-        slack_active_context_enabled=_flag("SLACK_ACTIVE_CONTEXT_ENABLED"),
-        slack_receipt_reaction_enabled=_flag("SLACK_RECEIPT_REACTION_ENABLED"),
         slack_receipt_reaction=os.getenv("SLACK_RECEIPT_REACTION", "eyes").strip() or "eyes",
-        slack_source_links_enabled=_flag("SLACK_SOURCE_LINKS_ENABLED"),
-        slack_task_cards_enabled=_flag("SLACK_TASK_CARDS_ENABLED"),
     )
 
 

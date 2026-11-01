@@ -86,7 +86,6 @@ def test_busy_ingress_retries(config, monkeypatch):
 
 def test_unowned_reply_does_not_send(config, monkeypatch):
     runtime, service = make_runtime(config, monkeypatch)
-    runtime.config = runtime.config.model_copy(update={"slack_bound_thread_replies": True})
     runtime.threads.get_surface_binding.return_value = {"binding_id": "binding-1", "thread_id": "thread-1"}
     runtime.threads.owns_thread.return_value = False
     event = message_event()
@@ -94,28 +93,3 @@ def test_unowned_reply_does_not_send(config, monkeypatch):
     agent_input.handle_domain_event(runtime, event)
     service.send_turn.assert_not_called()
     assert runtime.events.publish.call_args.args[1] == "SlackControlReplyRequested"
-
-
-def test_shortcut_context_is_sanitized(config, monkeypatch):
-    runtime, service = make_runtime(config, monkeypatch)
-    runtime.config = runtime.config.model_copy(update={"slack_shortcuts_enabled": True})
-    runtime.slack.conversation_replies.return_value = [
-        {"ts": "1.2", "user": "U2", "text": "selected", "secret": "omit-me"}
-    ]
-    event = {
-        "detail-type": "SlackShortcutReceived",
-        "detail": {
-            "interactionId": "Ix1",
-            "teamId": "T1",
-            "channelId": "C1",
-            "messageTs": "1.2",
-            "threadTs": "1.0",
-            "userId": "U1",
-            "callbackId": "summarize_thread",
-        },
-    }
-    agent_input.handle_domain_event(runtime, event)
-    sent = service.send_turn.call_args.args
-    assert sent[:2] == ("thread-1", "slack:interaction:T1:Ix1")
-    assert "untrusted reference data" in sent[2]
-    assert "omit-me" not in sent[2]

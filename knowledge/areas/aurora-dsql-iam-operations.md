@@ -124,8 +124,8 @@ The repository's `scripts/deploy.sh` obtains the DSQL endpoint and Lambda role A
 - **Migration `40001`:** retry after concurrent schema changes settle; DDL can invalidate cached schema catalogs.
 - **Lambda works but local script fails:** compare endpoint, region, database role, and credential provider chain.
 
-## Related knowledge
+## Related documentation
 
-- [Slack Events API operations](slack-events-api-operations.md)
-- [Anthropic Managed Agents operations](anthropic-managed-agents-operations.md)
-- [Managed Agent application end-to-end runbook](../projects/managed-agent-application-e2e-runbook.md)
+- [DSQL](../../docs/dsql.md)
+- [Operations](../../docs/operations.md)
+- [Slack setup](../../docs/slack-setup.md)

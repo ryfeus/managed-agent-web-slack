@@ -9,11 +9,8 @@ from slack_sdk.errors import SlackApiError
 from managed_agents_app.db.connection import with_dsql_retry
 from managed_agents_app.slack.blocks import (
     completed_task_chunk,
-    denial_reason_modal,
-    feedback_blocks,
     markdown_text_chunk,
     source_link_blocks,
-    thread_unfurl,
     tool_approval_blocks,
     working_task_chunk,
 )
@@ -43,15 +40,12 @@ def test_serialization_retry_exhausts(monkeypatch) -> None:
 
 def test_slack_blocks_contain_only_metadata_and_controls() -> None:
     approvals = tool_approval_blocks("task-1", "req-1", "browser", {"url": "https://example.test"})
-    assert {item["action_id"] for item in approvals[1]["elements"]} == {
+    assert {item["action_id"] for item in approvals[-1]["elements"]} == {
         "agent_tool_allow",
         "agent_tool_deny",
-        "agent_tool_deny_with_reason",
     }
-    assert feedback_blocks("task-1", "message-1")[0]["block_id"] == "feedback:task-1:message-1"
-    assert denial_reason_modal({"request_id": "req-1"})["callback_id"] == "agent_tool_deny_reason"
-    unfurl = thread_unfurl("thread-1", "Title", "active", "https://example.test/?thread=thread-1")
-    assert unfurl["blocks"][1]["elements"][0]["action_id"] == "agent_link_thread"
+    # Slack otherwise rewrites URLs/mentions inside the reviewed JSON arguments.
+    assert approvals[-2]["text"]["verbatim"] is True
     assert working_task_chunk("Ev1", "https://example.test/message")["sources"][0]["text"] == (
         "Original message"
     )
@@ -101,6 +95,21 @@ def test_slack_stream_adapter_enforces_and_uses_chunk_mode() -> None:
         slack.start_stream("C1", "10.1", "T1", "U1", "text", chunks=chunks)
     with pytest.raises(ValueError):
         slack.stop_stream("C1", "10.2", text="text", chunks=chunks)
+
+
+@pytest.mark.parametrize("sdk_exception", [False, True])
+def test_stopping_an_already_closed_slack_stream_is_idempotent(sdk_exception) -> None:
+    raw = MagicMock()
+    response = {"ok": False, "error": "message_not_in_streaming_state"}
+    if sdk_exception:
+        raw.chat_stopStream.side_effect = SlackApiError("closed", response)
+    else:
+        raw.chat_stopStream.return_value = response
+    slack = SlackClient("xoxb-test", raw)
+    slack.stop_stream("C1", "10.2", chunks=[completed_task_chunk("Ev1")])
+    raw.chat_stopStream.side_effect = SlackApiError("denied", {"error": "missing_scope"})
+    with pytest.raises(SlackApiError):
+        slack.stop_stream("C1", "10.2")
 
 
 def test_slack_permalink_and_reaction_adapters() -> None:

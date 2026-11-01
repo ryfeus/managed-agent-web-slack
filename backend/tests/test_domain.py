@@ -15,7 +15,6 @@ def test_event_boundary_preserves_v1_camel_case_contract() -> None:
         message_ts="1.1",
         user_id="U1",
         text="hello",
-        active_context={"channel_id": "C1"},
     )
     assert detail.boundary() == {
         "version": 1,
@@ -27,7 +26,6 @@ def test_event_boundary_preserves_v1_camel_case_contract() -> None:
         "userId": "U1",
         "text": "hello",
         "command": "message",
-        "activeContext": {"channel_id": "C1"},
         "eventType": "app_mention",
     }
 

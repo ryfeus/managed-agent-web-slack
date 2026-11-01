@@ -91,7 +91,7 @@ def test_slack_manifest_rendering_uses_deployment_origin() -> None:
 
     assert "https://example.cloudfront.net/slack/events" in rendered
     assert "https://example.cloudfront.net/slack/interactions" in rendered
-    assert "- example.cloudfront.net" in rendered
+    assert "unfurl_domains" not in rendered
     assert "__PUBLIC_APP_" not in rendered
 
 

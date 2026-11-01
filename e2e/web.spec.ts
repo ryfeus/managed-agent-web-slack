@@ -1,5 +1,5 @@
 import { test, expect, login, send } from './helpers/fixtures';
-import { control, state, drain } from './helpers/api';
+import { control, state, drain, backend } from './helpers/api';
 import { slackTurn } from './helpers/slack';
 
 test('E2E-001 Web sends and renders a completed A2A turn', async ({ page, request }) => {
@@ -53,47 +53,40 @@ test('E2E-009 explicit Stop cancels the A2A Task', async ({ page, request }) => 
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible();
 });
 
-test('E2E-010 approval survives reload and resumes the same Task', async ({ page, request }) => {
-    await control(request, 'a2a/script', { prompt: 'approval task', events: [
-        { id: 'tool-approval', type: 'agent.tool_use', name: 'browser', input: { url: 'https://example.com' } },
+test('E2E-010 OpenAPPA allows a governed tool without approval controls', async ({ page, request }) => {
+    await control(request, 'a2a/script', { prompt: 'automatic task', events: [
+        { id: 'tool-approval', type: 'agent.tool_use', name: 'web_fetch', input: { url: 'https://example.com' } },
         { type: 'session.status_idle', stop_reason: { type: 'requires_action', event_ids: ['tool-approval'] } },
     ] });
     await login(page);
-    await send(page, 'approval task');
-    await expect.poll(async () => (await state(request)).database.agent_tasks.length).toBe(1);
-    await expect.poll(async () => {
-        await drain(request);
-        return (await state(request)).database.cma_tasks[0].a2a_state;
-    }).toBe('INPUT_REQUIRED');
-    await expect(page.locator('.tool-call')).toContainText('browser');
+    await send(page, 'automatic task');
+    await expect.poll(async () => { await drain(request); return (await state(request)).database.cma_tasks[0]?.a2a_state; }).toBe('COMPLETED');
+    await expect(page.locator('.assistant-message').last()).toContainText('Done');
+    await expect(page.getByRole('button', { name: 'Allow', exact: true })).toHaveCount(0);
     await page.reload();
-    await expect(page.locator('.tool-call')).toContainText('browser');
-    await expect(page.locator('.tool-call pre')).toContainText('https://example.com');
-    await page.getByRole('button', { name: 'Allow', exact: true }).click();
-    await page.getByRole('button', { name: 'Submit responses' }).click();
-    await expect.poll(async () => {
-        await drain(request);
-        return (await state(request)).a2a.confirm_calls;
-    }).toBe(1);
     await expect(page.locator('.assistant-message').last()).toContainText('Done');
     const current = await state(request);
+    expect(current.a2a.confirm_calls).toBe(1);
+    expect(current.database.cma_input_requests[0].decision).toBe('allow');
+    expect(current.database.cma_input_requests[0].status).toBe('resolved');
+    expect(current.database.cma_input_requests[0].confirmation_attempted_at).toBeTruthy();
     expect(current.database.agent_tasks).toHaveLength(1);
 });
 
-test('E2E-010B queued Task does not hide the earliest pending approval after reload', async ({ page, request }) => {
+test('E2E-010B queued Task does not hide the earliest pending clarification after reload', async ({ page, request }) => {
     await control(request, 'a2a/automatic', { enabled: false });
     await login(page);
-    await send(page, 'approval task');
+    await send(page, 'clarification task');
     await expect.poll(async () => { await drain(request); return (await state(request)).database.cma_tasks[0]?.a2a_state; }).toBe('WORKING');
     const initial = await state(request);
     const sessionId = initial.a2a.sessions[0].id as string;
     const firstTaskId = initial.database.cma_tasks[0].task_id as string;
     const threadId = new URL(page.url()).searchParams.get('thread');
     expect(threadId).toBeTruthy();
-    await page.evaluate((id) => {
+    await page.evaluate(({ id, api }) => {
         const controller = new AbortController();
         (window as typeof window & { abortQueuedTask?: () => void }).abortQueuedTask = () => controller.abort();
-        void fetch('http://127.0.0.1:3001/api/agui', {
+        void fetch(`${api}/api/agui`, {
             method: 'POST', credentials: 'include', signal: controller.signal,
             headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
             body: JSON.stringify({
@@ -101,11 +94,11 @@ test('E2E-010B queued Task does not hide the earliest pending approval after rel
                 messages: [{ id: crypto.randomUUID(), role: 'user', content: 'queued task' }],
             }),
         }).catch(() => undefined);
-    }, threadId);
+    }, { id: threadId, api: backend });
     await expect.poll(async () => { await drain(request); return (await state(request)).database.cma_tasks.map((item: { a2a_state: string }) => item.a2a_state).sort(); }).toEqual(['SUBMITTED', 'WORKING']);
     await page.evaluate(() => (window as typeof window & { abortQueuedTask?: () => void }).abortQueuedTask?.());
     await control(request, 'a2a/emit', { session_id: sessionId, event: {
-        id: 'tool-approval', type: 'agent.tool_use', name: 'browser', input: { url: 'https://example.com' },
+        id: 'tool-approval', type: 'agent.custom_tool_use', name: 'ask_user', input: { prompt: 'Which environment?' },
     } });
     await control(request, 'a2a/emit', { session_id: sessionId, event: {
         type: 'session.status_idle', stop_reason: { type: 'requires_action', event_ids: ['tool-approval'] },
@@ -113,31 +106,32 @@ test('E2E-010B queued Task does not hide the earliest pending approval after rel
     await control(request, 'a2a/reconcile', { session_id: sessionId });
     await expect.poll(async () => { await drain(request); return (await state(request)).database.cma_tasks.find((item: { task_id: string }) => item.task_id === firstTaskId)?.a2a_state; }).toBe('INPUT_REQUIRED');
     await page.reload();
-    await expect(page.locator('.tool-call')).toContainText('browser');
-    await page.getByRole('button', { name: 'Allow', exact: true }).click();
+    await expect(page.locator('.interrupt-panel')).toContainText('Which environment?');
+    await page.getByRole('textbox', { name: 'Clarification answer' }).fill('staging');
     await page.getByRole('button', { name: 'Submit responses' }).click();
-    await expect.poll(async () => { await drain(request); return (await state(request)).a2a.confirm_calls; }).toBe(1);
+    await expect.poll(async () => { await drain(request); return (await state(request)).a2a.custom_result_calls; }).toBe(1);
     const current = await state(request);
     expect(current.database.agent_tasks).toHaveLength(2);
-    expect(current.database.cma_input_requests[0].task_id).toBe(firstTaskId);
+    expect(current.database.cma_clarification_requests[0].task_id).toBe(firstTaskId);
 });
 
-test('E2E-010C Stop cancels a pending approval and restores Send', async ({ page, request }) => {
-    await control(request, 'a2a/script', { prompt: 'stop approval', events: [
-        { id: 'tool-stop', type: 'agent.tool_use', name: 'browser', input: { url: 'https://example.com' } },
+// keep this cancellation/history-refresh race covered without retries or skips.
+test('E2E-010C Stop cancels a pending clarification and restores Send', async ({ page, request }) => {
+    await control(request, 'a2a/script', { prompt: 'stop clarification', events: [
+        { id: 'tool-stop', type: 'agent.custom_tool_use', name: 'ask_user', input: { prompt: 'Which environment?' } },
         { type: 'session.status_idle', stop_reason: { type: 'requires_action', event_ids: ['tool-stop'] } },
     ] });
     await login(page);
-    await send(page, 'stop approval');
+    await send(page, 'stop clarification');
     await expect.poll(async () => { await drain(request); return (await state(request)).database.cma_tasks[0]?.a2a_state; }).toBe('INPUT_REQUIRED');
-    await expect(page.locator('.tool-call')).toHaveCount(1);
+    await expect(page.locator('.interrupt-panel')).toHaveCount(1);
     await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Stop', exact: true }).click();
     await expect.poll(async () => { await drain(request); return (await state(request)).database.cma_tasks[0]?.a2a_state; }).toBe('CANCELED');
-    await expect(page.locator('.tool-call')).toHaveCount(0);
+    await expect(page.locator('.interrupt-panel')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible();
     await page.reload();
-    await expect(page.locator('.tool-call')).toHaveCount(0);
+    await expect(page.locator('.interrupt-panel')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible();
     expect((await state(request)).database.agent_tasks).toHaveLength(1);
 });
@@ -197,6 +191,7 @@ test('E2E-011B history-resume race restores the intervening message once', async
     expect((await state(request)).database.agent_tasks).toHaveLength(1);
 });
 
+// the initial panel can also disappear despite a valid AG-UI interrupt; keep this enabled.
 test('E2E-012 clarification resumes through generic human input', async ({ page, request }) => {
     await control(request, 'a2a/script', { prompt: 'clarify task', events: [
         { id: 'ask-one', type: 'agent.custom_tool_use', name: 'ask_user', input: {
@@ -217,22 +212,18 @@ test('E2E-012 clarification resumes through generic human input', async ({ page,
     expect(JSON.stringify(current.database.cma_clarification_requests)).not.toContain('staging');
 });
 
-test('E2E-013 multiple approvals require explicit responses for every request', async ({ page, request }) => {
+test('E2E-013 multiple tool calls are automatically allowed or denied', async ({ page, request }) => {
     await control(request, 'a2a/script', { prompt: 'two tools', events: [
-        { id: 'tool-one', type: 'agent.tool_use', name: 'browser', input: { url: 'https://example.com' } },
-        { id: 'tool-two', type: 'agent.tool_use', name: 'bash', input: { command: 'pwd' } },
-        { type: 'session.status_idle', stop_reason: { type: 'requires_action', event_ids: ['tool-one', 'tool-two'] } },
+        { id: 'tool-one', type: 'agent.tool_use', name: 'web_search', input: { query: 'example' } },
+        { id: 'tool-two', type: 'agent.tool_use', name: 'unknown', input: {} },
+        { type: 'session.status_idle', stop_reason: { type: 'requires_action', event_ids: ['tool-two', 'tool-one'] } },
     ] });
     await login(page);
     await send(page, 'two tools');
-    await expect.poll(async () => { await drain(request); return (await state(request)).database.cma_tasks[0]?.a2a_state; }).toBe('INPUT_REQUIRED');
-    await expect(page.locator('.tool-call')).toHaveCount(2);
-    await expect(page.getByRole('button', { name: 'Submit responses' })).toBeDisabled();
-    await page.getByRole('button', { name: 'Allow', exact: true }).first().click();
-    await expect(page.getByRole('button', { name: 'Submit responses' })).toBeDisabled();
-    await page.getByRole('button', { name: 'Deny', exact: true }).last().click();
-    await page.getByRole('button', { name: 'Submit responses' }).click();
     await expect.poll(async () => { await drain(request); return (await state(request)).a2a.confirm_calls; }).toBe(2);
+    await expect.poll(async () => { await drain(request); return (await state(request)).database.cma_tasks[0]?.a2a_state; }).toBe('COMPLETED');
+    await expect(page.getByRole('button', { name: 'Submit responses' })).toHaveCount(0);
+    expect((await state(request)).database.cma_input_requests.map((row: { decision: string }) => row.decision).sort()).toEqual(['allow', 'deny']);
     expect((await state(request)).database.agent_tasks).toHaveLength(1);
 });
 
@@ -246,12 +237,12 @@ test('E2E-014 retrying one AG-UI run ID admits one durable turn', async ({ page,
         threadId, runId, state: {}, tools: [], context: [], forwardedProps: {},
         messages: [{ id: crypto.randomUUID(), role: 'user', content: 'retry run' }],
     };
-    const first = page.context().request.post('http://127.0.0.1:3001/api/agui', {
+    const first = page.context().request.post(`${backend}/api/agui`, {
         data: payload, headers: { accept: 'text/event-stream' }, timeout: 30000,
     });
     await expect.poll(async () => { await drain(request); return (await state(request)).a2a.create_calls; }).toBe(1);
     expect((await first).status()).toBe(200);
-    const second = page.context().request.post('http://127.0.0.1:3001/api/agui', {
+    const second = page.context().request.post(`${backend}/api/agui`, {
         data: payload, headers: { accept: 'text/event-stream' }, timeout: 30000,
     });
     expect((await second).status()).toBe(200);

@@ -8,6 +8,7 @@ from anthropic.types.beta import BetaManagedAgentsAgentParams
 
 from managed_agents_app.config import AppConfig
 from managed_agents_app.models import SessionSummary
+from managed_agents_app.observability import emit
 
 
 def as_dict(value: Any) -> dict[str, Any]:
@@ -124,9 +125,11 @@ class ManagedAgentClient:
         delta_types: list[Literal["agent.message", "agent.thinking"]] = (
             ["agent.message", "agent.thinking"] if include_thinking else ["agent.message"]
         )
+        emit("provider_stream_opening", timeout_seconds=timeout_seconds)
         stream = self.raw.beta.sessions.events.stream(
             session_id, event_deltas=delta_types, timeout=timeout_seconds
         )
+        emit("provider_stream_opened")
         for event in stream:
             yield as_dict(event)
 

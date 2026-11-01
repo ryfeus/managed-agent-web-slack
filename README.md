@@ -1,129 +1,64 @@
 # Managed Agent Web + Slack
 
-A reference implementation for continuing the same application conversation
-across an assistant-ui web application and Slack. It deploys as an AWS serverless
-application and keeps its application-side state deliberately small.
-
 This is a reference implementation and is not an official Anthropic, Slack, AWS,
 or assistant-ui project.
 
-> Anthropic is the canonical conversation and execution store behind the A2A controller. Aurora DSQL stores
-> identity, authorization, routing, idempotency, projection metadata, and opaque temporary-object keys—not a
-> duplicate transcript, tool output, or reasoning record.
-
-## Architecture
+A serverless reference application for continuing the same Anthropic Managed Agent conversation from Web and Slack. The application owns authorized threads and A2A Tasks; the private controller owns provider sessions, execution and native OpenAPPA tool policy. Anthropic retains the canonical transcript. Aurora DSQL holds identity, routing, idempotency and projection metadata only.
 
 ```mermaid
 flowchart LR
-  Browser["Browser / assistant-ui"] --> Edge["CloudFront"]
-  Slack["Slack Agent View, DMs, channels"] --> Edge
-  Edge --> Static["S3 static frontend"]
-  Edge --> API["API Gateway"]
-
-  API --> WebAPI["web-api Lambda"]
-  API --> Bridge["agui-bridge Lambda"]
-  API --> Ingress["Slack ingress Lambda"]
-  API --> Webhook["Anthropic webhook Lambda"]
-
-  Ingress --> Bus["EventBridge"]
-  Webhook --> A2A
-  Bus --> Queue["SQS agent-input queue"]
-  Queue --> Input["agent-input Lambda"]
-  Bus --> Projector["Slack projector Lambda"]
-
-  WebAPI <--> DSQL["Aurora DSQL\nidentity · authorization · routing · receipts"]
-  Bridge --> DSQL
-  Input <--> DSQL
-  Projector <--> DSQL
-  Bridge --> A2A["Private A2A controller"]
+  Web[Web / assistant-ui] --> AGUI[AG-UI bridge]
+  AGUI --> A2A[Private A2A controller]
+  Slack[Signed Slack ingress] --> Input[Queued input]
   Input --> A2A
-  Projector --> A2A
-  A2A --> Claude["Anthropic Managed Agent\ncanonical transcript + execution"]
-  Projector --> Slack
+  A2A --> Scheduler[Durable scheduler + OpenAPPA]
+  Scheduler --> CMA[Anthropic Managed Agents]
+  CMA --> Hooks[Verified webhooks]
+  Hooks --> Scheduler
+  Timer[30-second reconciliation] --> Scheduler
+  Scheduler --> Push[A2A push + GetTask]
+  Push --> Projector[Short Slack projector]
+  CMA -. future P1 preview .-> Preview[Optional preview transport]
 ```
 
-## Try it locally
+The durable P0 path completes without provider SSE or preview transport. OpenAPPA can automatically allow/deny or require review of an exact tool call. Web and Slack submit the first authorized human ruling; a fresh native OpenAPPA remedy must authorize it before CMA confirmation.
 
-Prerequisites: Node.js 22+, Python 3.14 with [uv](https://docs.astral.sh/uv/),
-Docker with Compose v2, and Chromium for Playwright. The local E2E runner installs
-Chromium when needed.
+## Run locally
+
+Prerequisites: Node 22 or 24, Python 3.14 through uv, Docker Compose, and the pinned Rust 1.99.0 toolchain. Install Chromium explicitly for browser tests.
 
 ```bash
 npm ci
 uv sync --directory backend --locked
-npm run dev:e2e
+npx playwright install chromium
+npm run dev
 ```
 
-Open `http://127.0.0.1:3000` and sign in with `e2e-access-token`. This starts a
-disposable PostgreSQL database plus deterministic Anthropic and Slack adapters.
-It needs no AWS, Slack, or Anthropic credentials and leaves no provider state.
+Use the printed Web URL and local access token `e2e-access-token`. Ctrl-C cleans up this foreground stack. Local mode uses isolated PostgreSQL, fake CMA and recorded Slack APIs; it never loads `.env` or live credentials. See [local development](docs/local-development.md) for isolation and review fixtures.
 
-Run the normal checks with:
+## Check and build
 
 ```bash
-./scripts/verify --fast
-./scripts/verify --full
+npm run check             # native policy, lint, format, types, unit/contract tests
+npm run e2e               # PostgreSQL + semantic browser tests
+npm run e2e:production    # exported Web smoke
+npm run build             # Web + Lambda artifacts
+npm run terraform:validate
+npm run secrets:check     # requires Gitleaks 8.24.3
 ```
 
-See [testing guidance](docs/testing.md) for focused, semantic E2E, and separately
-opt-in live smoke tests.
+`npm run verify:full` composes the local checks, both browser layers, Lambda build and Terraform tests. [Testing](docs/testing.md) distinguishes fake-provider evidence from live acceptance and [known limitations](docs/known-limitations.md).
 
-## Deploy with real providers
+## Deploy deliberately
 
-Real deployment requires an AWS account and usable credentials, Terraform,
-ant CLI >= 1.30.0, Anthropic credentials for the lockfile's workspace, and a Slack
-app. Copy `.env.example` to an untracked `.env` and set `ANTHROPIC_API_KEY`,
-`WEB_ACCESS_TOKEN`, and `WEB_COOKIE_SECRET`. Agent/environment definitions and
-identity live in [cma/](cma/README.md); deployment derives IDs and an exact agent
-version from its committed lockfile. For a fresh workspace, follow the bootstrap
-and existing-resource migration procedure before deploying.
-
-`AWS_PROFILE` and `AWS_REGION` select the target. `EXPECTED_AWS_ACCOUNT_ID` is
-an optional safety assertion. Remote state is rendered under `.generated/` using
-a deterministic per-account bucket name, or an explicit `TF_STATE_BUCKET` for an
-existing deployment.
+Configure untracked `.env` from `.env.example`, verify the AWS account, and use the existing deployment's `TF_STATE_BUCKET`. Region defaults to `us-west-2`.
 
 ```bash
-aws sso login --profile default
-npm run cma:plan
-./scripts/deploy.sh
-npm run slack:manifest
+npm run cma:plan           # provider definition preview
+npm run deploy:plan        # account checks + saved Terraform plan; no apply
+npm run deploy            # explicit real deployment
 ```
 
-The wrapper validates deployment settings, discovers the target account, applies
-the CMA definitions without force/prune, resolves the updated version pin, bootstraps
-remote state when necessary, deploys, syncs secrets to Secrets Manager, migrates
-and seeds DSQL, uploads the frontend, and renders a Slack manifest. Import the
-generated `.generated/slack-manifest.yaml`, keep Socket Mode disabled, then
-set `PUBLIC_APP_URL` to the Terraform `application_url` output, add locally held
-Slack credentials and identity mappings, choose feature gates, and rerun
-`./scripts/deploy.sh` to synchronize Lambda configuration and secrets. Leave
-URL-dependent Slack gates disabled during the initial deployment.
+Review [operations](docs/operations.md), [Managed Agent setup](docs/managed-agent-setup.md), and [Slack setup](docs/slack-setup.md) first. Definitions and genuine lock state live in `cma/`; deployments pin the exact agent version. Normal deployment never force/prunes CMA resources. Secrets and generated deployment outputs stay outside Git.
 
-Terraform outputs are authoritative for the application URL, callback URLs, DSQL
-endpoint, and resource names. See [operations](docs/operations.md),
-[Managed Agent setup](docs/managed-agent-setup.md), [Slack setup](docs/slack-setup.md),
-and [DSQL operations](docs/dsql.md) for the full lifecycle.
-
-Review and commit any `cma/claude-lock.json` update after deployment, including
-partial failures. Agent sessions are version-pinned; environments are selected by
-ID, so environment changes can affect subsequent sessions before AWS rollout.
-
-## Slack experience
-
-The generated manifest configures Agent View, Events API delivery, signed
-interactivity, shortcuts, and thread-link unfurls. The application supports
-authorized web/Slack conversation continuity, streaming task cards, source links,
-exact-message receipt reactions, tool approvals, feedback, and thread replies;
-each Slack capability is separately feature-gated and defaults off.
-
-Every inbound Slack request is authenticated with Slack's timestamped signature.
-The verified team and user IDs are authorized through DSQL; optional environment
-allowlists can reject development traffic but never grant access.
-
-## Contributing and security
-
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing architecture, persistence,
-or provider boundaries. Report vulnerabilities through the repository's GitHub
-Private Vulnerability Reporting flow; do not put secrets in an issue. Details are
-in [SECURITY.md](SECURITY.md).
+See [architecture](docs/architecture.md), [contributing](CONTRIBUTING.md), and the [DSQL runbook](docs/dsql.md). Optional real-provider testing is API-only: `RUN_LIVE_E2E=1 npm run test:live`; it requires a configured developer sandbox and performs read-only preflight before sending messages.

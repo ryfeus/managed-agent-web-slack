@@ -18,8 +18,11 @@ import sys
 from pathlib import Path
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
-with open(os.environ['COMMAND_LOG'], 'a') as stream:
+sensitive_names = ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+                   'ANTHROPIC_API_KEY', 'WEB_ACCESS_TOKEN', 'WEB_COOKIE_SECRET')
+with open(Path(__file__).resolve().parent.parent / 'commands.jsonl', 'a') as stream:
     stream.write(json.dumps({'name': name, 'args': args, 'cwd': str(Path.cwd()),
+        'has_credentials': any(k in os.environ for k in sensitive_names),
         'pins': {k: v for k, v in os.environ.items() if k.startswith('TF_VAR_claude_')},
         'runtime': {k: v for k, v in os.environ.items() if k.startswith('CLAUDE_')}}) + '\n')
 if name == 'ant':
@@ -93,7 +96,7 @@ def sandbox(tmp_path):
         for k, v in os.environ.items()
         if not k.startswith(("AWS_", "TF_VAR_", "CLAUDE_", "SLACK_", "MOCK_"))
     }
-    env.update(PATH=f"{binaries}:{env['PATH']}", COMMAND_LOG=str(tmp_path / "commands.jsonl"))
+    env.update(PATH=f"{binaries}:{env['PATH']}")
     return tmp_path, env
 
 
@@ -226,6 +229,32 @@ def test_deploy_plan_only_uses_lock_without_ant(sandbox):
         "TF_VAR_claude_agent_version": "7",
         "TF_VAR_claude_environment_id": "env_test",
     }
+    builds = [c for c in log if c["name"] == "npm"]
+    assert len(builds) == 3
+    assert all(not c["has_credentials"] and not c["runtime"] and not c["pins"] for c in builds)
+
+
+def test_application_only_deploy_preserves_cma_secrets_and_database(sandbox):
+    result = run(sandbox, "deploy.sh", "--application-only")
+    assert result.returncode == 0, result.stderr
+    log = commands(sandbox)
+    assert not any(c["name"] == "ant" for c in log)
+    assert not any(
+        c["name"] == "npm" and c["args"][-1] in {"secrets:sync", "db:migrate", "db:seed"} for c in log
+    )
+    apply = next(c for c in log if c["name"] == "terraform" and "apply" in c["args"])
+    assert apply["pins"]["TF_VAR_claude_agent_version"] == "7"
+    assert all(not c["has_credentials"] for c in log if c["name"] == "npm")
+    # Rollback exports may have older timestamps: replace HTML before pruning
+    # old assets, then invalidate only after the complete export is present.
+    copy = next(i for i, c in enumerate(log) if c["name"] == "aws" and c["args"][:2] == ["s3", "cp"])
+    prune = next(i for i, c in enumerate(log) if c["name"] == "aws" and c["args"][:2] == ["s3", "sync"])
+    invalidate = next(
+        i
+        for i, c in enumerate(log)
+        if c["name"] == "aws" and c["args"][:2] == ["cloudfront", "create-invalidation"]
+    )
+    assert copy < prune < invalidate
 
 
 def test_deploy_uses_updated_lock_before_aws_apply(sandbox):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from a2a.types import a2a_pb2 as a2a
@@ -26,21 +26,32 @@ def task(state: int = a2a.TaskState.TASK_STATE_COMPLETED) -> a2a.Task:
 def make_runtime(config, monkeypatch, current=None):
     config = config.model_copy(
         update={
-            "slack_streaming_enabled": True,
-            "slack_task_cards_enabled": True,
-            "slack_agent_view_enabled": True,
             "slack_bot_token": "xoxb-test",
         }
     )
     repo, threads, slack = MagicMock(), MagicMock(), MagicMock()
-    repo.ensure_projection.return_value = {
+    projection = {
         "slack_message_ts": None,
         "status": "pending",
         "request_event_id": "Ev1",
         "source_message_ts": "1.1",
         "initiator_user_id": "U1",
+        "last_task_state": None,
     }
-    repo.claim_task_stream.return_value = Claim("acquired", "stream-claim")
+    repo.ensure_projection.return_value = projection
+    repo.get_projection.return_value = projection
+    repo.claim_task_stream.side_effect = lambda *_args: Claim("acquired", "stream-claim", dict(projection))
+
+    def finish_stream(_binding, _task, _token, *, fallback, state, error=None):
+        settled = state in {"INPUT_REQUIRED", "COMPLETED", "FAILED", "CANCELED", "REJECTED"}
+        projection.update(
+            last_task_state=state, status="fallback" if fallback else "completed" if settled else "pending"
+        )
+        if settled and not fallback:
+            projection["slack_message_ts"] = None
+
+    repo.finish_stream.side_effect = finish_stream
+    repo.update_stream_message.side_effect = lambda _b, _t, _c, ts: projection.update(slack_message_ts=ts)
     repo.claim_item.return_value = Claim("acquired", "item-claim")
     slack.start_stream.return_value = "2.1"
     service = MagicMock()
@@ -48,11 +59,8 @@ def make_runtime(config, monkeypatch, current=None):
     async def get_task(*_args, **_kwargs):
         return current or task()
 
-    async def subscribe(*_args, **_kwargs):
-        yield a2a.StreamResponse(task=current or task())
-
-    service.get_task.side_effect = get_task
-    service.subscribe_task.side_effect = subscribe
+    service.get_task = AsyncMock(side_effect=get_task)
+    service.subscribe_task.side_effect = AssertionError("Slack P0 must not subscribe")
 
     @asynccontextmanager
     async def control(_runtime):
@@ -79,26 +87,8 @@ def projection_event():
     }
 
 
-def test_live_subscription_projects_complete_message_and_card(config, monkeypatch):
-    runtime, service = make_runtime(config, monkeypatch)
-    slack_projector.handle_domain_event(runtime, projection_event())
-    service.subscribe_task.assert_called_once_with("thread-1", "task-1", human_input=True)
-    assert runtime.slack.start_stream.call_args.kwargs["chunks"] == [working_task_chunk("Ev1")]
-    runtime.slack.append_stream_chunks.assert_called_once_with("C1", "2.1", [markdown_text_chunk("answer")])
-    assert runtime.slack.stop_stream.call_args.kwargs["chunks"] == [completed_task_chunk("Ev1")]
-    runtime.slack_a2a.finish_item.assert_called_once()
-    runtime.slack_a2a.finish_stream.assert_called_once_with(
-        "binding-1", "task-1", "stream-claim", fallback=False, state="COMPLETED"
-    )
-
-
-def test_push_retries_during_live_lease(config, monkeypatch):
-    runtime, _ = make_runtime(config, monkeypatch)
-    runtime.threads.list_surface_bindings.return_value = [
-        {"surface": "slack", "binding_id": "binding-1", "external_thread_id": "C1:1.0"}
-    ]
-    runtime.slack_a2a.active_stream.return_value = True
-    event = {
+def update_event():
+    return {
         "detail-type": "A2ATaskUpdated",
         "detail": {
             "deliveryId": "delivery-1",
@@ -110,45 +100,105 @@ def test_push_retries_during_live_lease(config, monkeypatch):
             "taskState": "COMPLETED",
         },
     }
-    import pytest
 
-    with pytest.raises(RuntimeError, match="live projection"):
-        slack_projector.handle_domain_event(runtime, event)
+
+def bind(runtime):
+    runtime.threads.list_surface_bindings.return_value = [
+        {"surface": "slack", "binding_id": "binding-1", "external_thread_id": "C1:1.0", "tenant_id": "T1"}
+    ]
+
+
+def test_initial_card_returns_working_then_push_finishes_without_subscription(config, monkeypatch):
+    # nonterminal setup releases the claim as pending; push finishes the same card.
+    current = task(a2a.TaskState.TASK_STATE_WORKING)
+    current.ClearField("history")
+    runtime, service = make_runtime(config, monkeypatch, current)
+    bind(runtime)
+    slack_projector.handle_domain_event(runtime, projection_event())
+    service.get_task.assert_awaited_once_with("thread-1", "task-1", human_input=True)
+    service.subscribe_task.assert_not_called()
+    assert runtime.slack.start_stream.call_args.kwargs["chunks"] == [working_task_chunk("Ev1")]
+    runtime.slack.stop_stream.assert_not_called()
+    runtime.slack_a2a.finish_stream.assert_called_once_with(
+        "binding-1", "task-1", "stream-claim", fallback=False, state="WORKING"
+    )
+    current.CopyFrom(task())
+    slack_projector.handle_domain_event(runtime, update_event())
+    runtime.slack.start_stream.assert_called_once()
+    runtime.slack.append_stream_chunks.assert_called_once_with("C1", "2.1", [markdown_text_chunk("answer")])
+    assert runtime.slack.stop_stream.call_args.kwargs["chunks"] == [completed_task_chunk("Ev1")]
+    assert runtime.slack_a2a.get_projection.return_value["status"] == "completed"
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        a2a.TaskState.TASK_STATE_COMPLETED,
+        a2a.TaskState.TASK_STATE_CANCELED,
+        a2a.TaskState.TASK_STATE_FAILED,
+        a2a.TaskState.TASK_STATE_INPUT_REQUIRED,
+    ],
+)
+def test_late_setup_after_settled_push_does_not_open_stream(config, monkeypatch, state):
+    runtime, service = make_runtime(config, monkeypatch, task(state))
+    bind(runtime)
+    projection = runtime.slack_a2a.get_projection.return_value
+    projection["initiator_user_id"] = None
+    slack_projector.handle_domain_event(runtime, update_event())
+    runtime.slack.post_reply.assert_called_once()
+    projection["initiator_user_id"] = "U1"
+    runtime.slack_a2a.claim_item.return_value = Claim("completed")
+    slack_projector.handle_domain_event(runtime, projection_event())
+    slack_projector.handle_domain_event(runtime, update_event())
+    runtime.slack.start_stream.assert_not_called()
+    runtime.slack.post_reply.assert_called_once()
+    service.subscribe_task.assert_not_called()
+
+
+def test_push_retries_short_claim_then_reads_current_task(config, monkeypatch):
+    runtime, service = make_runtime(config, monkeypatch)
+    bind(runtime)
+    runtime.slack_a2a.claim_task_stream.side_effect = [Claim("busy")]
+    with pytest.raises(RuntimeError, match="projection is busy"):
+        slack_projector.handle_domain_event(runtime, update_event())
+    service.get_task.assert_not_called()
     runtime.slack.post_reply.assert_not_called()
 
 
 def test_push_projects_to_each_slack_binding(config, monkeypatch):
-    runtime, _ = make_runtime(config, monkeypatch)
+    runtime, service = make_runtime(config, monkeypatch)
+    runtime.slack_a2a.get_projection.return_value["initiator_user_id"] = None
     runtime.threads.list_surface_bindings.return_value = [
-        {"surface": "slack", "binding_id": "b1", "external_thread_id": "C1:1.0"},
-        {"surface": "slack", "binding_id": "b2", "external_thread_id": "C2:2.0"},
+        {"surface": "slack", "binding_id": "b1", "external_thread_id": "C1:1.0", "tenant_id": "T1"},
+        {"surface": "slack", "binding_id": "b2", "external_thread_id": "C2:2.0", "tenant_id": "T1"},
         {"surface": "web", "binding_id": "b3", "external_thread_id": "web"},
     ]
-    runtime.slack_a2a.active_stream.return_value = False
-    event = {
-        "detail-type": "A2ATaskUpdated",
-        "detail": {
-            "deliveryId": "delivery-1",
-            "agentId": "cma",
-            "threadId": "thread-1",
-            "taskId": "task-1",
-            "contextId": "context-1",
-            "eventKind": "task",
-            "taskState": "COMPLETED",
-        },
-    }
-    slack_projector.handle_domain_event(runtime, event)
+    slack_projector.handle_domain_event(runtime, update_event())
     assert runtime.slack.post_reply.call_count == 2
     assert runtime.slack_a2a.ensure_projection.call_count == 2
+    assert service.get_task.await_count == 2
 
 
-@pytest.mark.parametrize("feedback,source_link", [(True, False), (False, True), (True, True), (False, False)])
+def test_failed_append_releases_claim_and_push_retries_same_card(config, monkeypatch):
+    runtime, service = make_runtime(config, monkeypatch)
+    bind(runtime)
+    runtime.slack.append_stream_chunks.side_effect = [RuntimeError("rate limited"), None]
+    with pytest.raises(RuntimeError, match="rate limited"):
+        slack_projector.handle_domain_event(runtime, projection_event())
+    runtime.slack_a2a.finish_stream.assert_called_once_with(
+        "binding-1", "task-1", "stream-claim", fallback=True, state="COMPLETED", error="rate limited"
+    )
+    slack_projector.handle_domain_event(runtime, update_event())
+    runtime.slack.start_stream.assert_called_once()
+    runtime.slack.stop_stream.assert_called_once()
+    service.send.assert_not_called()
+    service.subscribe_task.assert_not_called()
+
+
+@pytest.mark.parametrize("source_link", [True, False])
 @pytest.mark.parametrize("answer", ["answer", ("long answer " * 600).strip()], ids=["short", "long"])
-def test_nonstreamed_answer_is_visible_with_optional_blocks(
-    config, monkeypatch, feedback, source_link, answer
-):
+def test_nonstreamed_answer_is_visible_with_optional_blocks(config, monkeypatch, source_link, answer):
     runtime, _ = make_runtime(config, monkeypatch)
-    runtime.config = runtime.config.model_copy(update={"slack_feedback_enabled": feedback})
     current = task()
     current.history[0].parts[0].text = answer
     slack_projector._project_task(
@@ -168,7 +218,6 @@ def test_nonstreamed_answer_is_visible_with_optional_blocks(
         assert "".join(block["text"]["text"] for block in sections) == answer
         assert all(0 < len(block["text"]["text"]) <= 3000 for block in sections)
         assert blocks[0]["type"] == "section"
-        assert any(block["type"] == "context_actions" for block in blocks) == feedback
         assert any(block["type"] == "context" for block in blocks) == source_link
     else:
-        assert not feedback and not source_link
+        assert not source_link

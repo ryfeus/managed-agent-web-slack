@@ -25,9 +25,9 @@ TLS with `sslmode=require`; no database password exists.
 ## Schema
 
 The schema contains principals, external identity mappings, application threads,
-surface bindings, A2A Task bindings, ingress state, projection receipts, feedback
-metadata, controller contexts/Tasks, and push state. Migration 008 removes the
-six legacy application session tables. It contains no Claude or Slack transcript;
+surface bindings, A2A Task bindings, ingress state, projection receipts, controller
+contexts/Tasks, review digests/rulings and push state. Historical feedback metadata
+is retained but no longer written by the product. It contains no Claude or Slack transcript;
 pending human input is referenced only by opaque temporary-object keys.
 
 ## Commands
@@ -46,3 +46,5 @@ npm run db:map-slack -- --team-id T01234567 --user-id U01234567
 `db:map-slack` maps the verified workspace and human member IDs from a signed
 Slack event to an application principal. It does not make optional development
 allowlists into authorization credentials.
+
+See the [DSQL IAM runbook](../knowledge/areas/aurora-dsql-iam-operations.md) for roles, TLS and transaction retries.

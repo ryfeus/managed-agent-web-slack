@@ -1,4 +1,4 @@
-"""Project current A2A Tasks into Slack; subscriptions only reduce latency."""
+"""Project canonical A2A Tasks into Slack on initial setup and standard A2A push."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from managed_agents_app.domain import (
     SlackWorkStarted,
 )
 from managed_agents_app.logging import log
+from managed_agents_app.observability import emit
 from managed_agents_app.ports.slack import SlackGateway
 from managed_agents_app.protocols.human_input import ClarificationRequest, ToolApprovalRequest
 from managed_agents_app.runtime import Runtime, get_runtime
@@ -33,7 +34,6 @@ from managed_agents_app.slack.a2a_projection import (
 )
 from managed_agents_app.slack.blocks import (
     completed_task_chunk,
-    feedback_blocks,
     markdown_text_chunk,
     response_text_blocks,
     source_link_blocks,
@@ -56,29 +56,20 @@ async def handle_domain_event_async(runtime: Runtime, event: dict[str, Any]) -> 
     elif kind == SLACK_WORK_STARTED:
         _work_started(runtime.config, slack, SlackWorkStarted.model_validate(detail))
     elif kind == SLACK_TASK_PROJECTION_REQUESTED:
-        await _live_projection(runtime, slack, SlackTaskProjectionRequested.model_validate(detail))
+        await _initial_projection(runtime, slack, SlackTaskProjectionRequested.model_validate(detail))
     elif kind == A2A_TASK_UPDATED:
         await _task_updated(runtime, slack, A2ATaskUpdated.model_validate(detail))
 
 
 def _work_started(config: AppConfig, slack: SlackGateway, detail: SlackWorkStarted) -> None:
-    if config.slack_agent_view_enabled:
-        slack.set_agent_status(
-            detail.channel_id,
-            detail.thread_ts,
-            "processing",
-            title="Claude thread",
-            initiator_user_id=detail.user_id,
-        )
-    if config.slack_receipt_reaction_enabled:
-        slack.add_reaction(detail.channel_id, detail.message_ts, config.slack_receipt_reaction)
-
-
-def _task_cards_enabled(config: AppConfig) -> bool:
-    if config.slack_task_cards_enabled and not config.slack_streaming_enabled:
-        log("warning", "slack_task_cards_disabled_without_streaming")
-        return False
-    return config.slack_task_cards_enabled
+    slack.set_agent_status(
+        detail.channel_id,
+        detail.thread_ts,
+        "processing",
+        title="Claude thread",
+        initiator_user_id=detail.user_id,
+    )
+    slack.add_reaction(detail.channel_id, detail.message_ts, config.slack_receipt_reaction)
 
 
 def _split_thread(value: str) -> tuple[str, str]:
@@ -91,7 +82,7 @@ def _split_thread(value: str) -> tuple[str, str]:
 def _source_permalink(
     config: AppConfig, slack: SlackGateway, channel_id: str, source_message_ts: str | None
 ) -> str | None:
-    if not config.slack_source_links_enabled or not source_message_ts:
+    if not config.public_app_url or not source_message_ts:
         return None
     try:
         return slack.message_permalink(channel_id, source_message_ts)
@@ -106,100 +97,113 @@ def _source_permalink(
         return None
 
 
-async def _live_projection(
+async def _initial_projection(
     runtime: Runtime, slack: SlackGateway, detail: SlackTaskProjectionRequested
 ) -> None:
-    if not runtime.config.slack_streaming_enabled:
-        return
-    repo = runtime.slack_a2a
-    projection = repo.ensure_projection(
+    runtime.slack_a2a.ensure_projection(
         detail.binding_id, detail.task_id, detail.request_id, detail.source_message_ts, detail.user_id
     )
-    claim = repo.claim_task_stream(detail.binding_id, detail.task_id, lease_seconds=840)
-    if claim.status != "acquired":
-        return
-    assert claim.token
-    stream_ts = projection["slack_message_ts"]
-    state: str | None = None
-    try:
-        permalink = _source_permalink(runtime.config, slack, detail.channel_id, detail.source_message_ts)
-        cards = _task_cards_enabled(runtime.config)
-        if cards and not stream_ts:
-            stream_ts = slack.start_stream(
-                detail.channel_id,
-                detail.thread_ts,
-                detail.team_id,
-                detail.user_id,
-                chunks=[working_task_chunk(detail.request_id, permalink)],
-                task_display_mode="timeline",
-            )
-            repo.update_stream_message(detail.binding_id, detail.task_id, claim.token, stream_ts)
-        async with application_control_plane(runtime) as service:
-            # SubscribeToTask sends a current Task first; it is not a replay log.
-            async with asyncio.timeout(800):
-                async for event in service.subscribe_task(detail.thread_id, detail.task_id, human_input=True):
-                    kind = event.WhichOneof("payload")
-                    if kind == "task":
-                        task = event.task
-                    else:
-                        task = await service.get_task(detail.thread_id, detail.task_id, human_input=True)
-                    state = task_state(task)
-                    stream_ts = _project_task(
-                        runtime,
-                        slack,
-                        detail.binding_id,
-                        detail.task_id,
-                        detail.channel_id,
-                        detail.thread_ts,
-                        task,
-                        stream_ts=stream_ts,
-                        live_token=claim.token,
-                        request_id=detail.request_id,
-                        permalink=permalink,
-                        team_id=detail.team_id,
-                    )
-                    if is_settled(task):
-                        break
-        repo.finish_stream(detail.binding_id, detail.task_id, claim.token, fallback=False, state=state)
-    except Exception as error:
-        repo.finish_stream(
-            detail.binding_id, detail.task_id, claim.token, fallback=True, state=state, error=str(error)
-        )
-        log(
-            "error",
-            "slack_a2a_stream_fallback",
-            thread_id=detail.thread_id,
-            task_id=detail.task_id,
-            binding_id=detail.binding_id,
-            error=str(error),
-        )
-        # A2ATaskUpdated retries against current Task after the lease is released.
+    await _reconcile_projection(
+        runtime,
+        slack,
+        detail.thread_id,
+        detail.binding_id,
+        detail.task_id,
+        detail.channel_id,
+        detail.thread_ts,
+        detail.team_id,
+    )
 
 
 async def _task_updated(runtime: Runtime, slack: SlackGateway, detail: A2ATaskUpdated) -> None:
-    async with application_control_plane(runtime) as service:
-        task = await service.get_task(detail.thread_id, detail.task_id, human_input=True)
     for binding in runtime.threads.list_surface_bindings(detail.thread_id):
         if binding["surface"] != "slack":
             continue
         binding_id = str(binding["binding_id"])
         channel_id, thread_ts = _split_thread(str(binding["external_thread_id"]))
-        projection = runtime.slack_a2a.ensure_projection(binding_id, detail.task_id)
-        if runtime.slack_a2a.active_stream(binding_id, detail.task_id):
-            raise RuntimeError("Slack live projection is active; retry current Task later")
-        permalink = _source_permalink(runtime.config, slack, channel_id, projection["source_message_ts"])
-        _project_task(
+        runtime.slack_a2a.ensure_projection(binding_id, detail.task_id)
+        await _reconcile_projection(
             runtime,
             slack,
+            detail.thread_id,
             binding_id,
             detail.task_id,
             channel_id,
             thread_ts,
+            str(binding["tenant_id"]),
+        )
+
+
+async def _reconcile_projection(
+    runtime: Runtime,
+    slack: SlackGateway,
+    thread_id: str,
+    binding_id: str,
+    task_id: str,
+    channel_id: str,
+    thread_ts: str,
+    team_id: str,
+) -> None:
+    repo = runtime.slack_a2a
+    # Serialize only a current Task read and Slack writes, never agent execution.
+    claim = repo.claim_task_stream(binding_id, task_id)
+    if claim.status != "acquired":
+        raise RuntimeError("Slack projection is busy; retry current Task later")
+    assert claim.token and claim.row
+    projection = claim.row
+    state = projection["last_task_state"]
+    try:
+        # Read inside the claim: an older delivery cannot overwrite a newer projection.
+        async with application_control_plane(runtime) as service:
+            task = await service.get_task(thread_id, task_id, human_input=True)
+        state = task_state(task)
+        emit("projection_snapshot", task_id=task_id, state=state)
+        stream_ts = projection["slack_message_ts"]
+        permalink = _source_permalink(runtime.config, slack, channel_id, projection["source_message_ts"])
+        # Only a Task that has never settled can start a card. Late setup after a
+        # terminal push (or clarification boundary) must not reopen a stopped stream.
+        can_start = projection["last_task_state"] in {None, "SUBMITTED", "WORKING"} and bool(
+            projection["initiator_user_id"]
+        )
+        if can_start and not stream_ts:
+            try:
+                stream_ts = slack.start_stream(
+                    channel_id,
+                    thread_ts,
+                    team_id,
+                    projection["initiator_user_id"],
+                    chunks=[working_task_chunk(projection["request_event_id"] or task_id, permalink)],
+                    task_display_mode="timeline",
+                )
+                repo.update_stream_message(binding_id, task_id, claim.token, stream_ts)
+            except Exception as error:
+                response = getattr(error, "response", None)
+                code = response.get("error") if response is not None else None
+                log(
+                    "warning",
+                    "slack_stream_open_failed",
+                    error_type=type(error).__name__,
+                    error_code=code if isinstance(code, str) and code.isidentifier() else "unknown",
+                    action="Check installed Slack scopes and reinstall the manifest for missing_scope",
+                )
+                stream_ts = None
+        _project_task(
+            runtime,
+            slack,
+            binding_id,
+            task_id,
+            channel_id,
+            thread_ts,
             task,
-            stream_ts=projection["slack_message_ts"] if projection["status"] != "completed" else None,
+            stream_ts=stream_ts,
             request_id=projection["request_event_id"],
             permalink=permalink,
         )
+        repo.finish_stream(binding_id, task_id, claim.token, fallback=False, state=state)
+    except Exception as error:
+        repo.finish_stream(binding_id, task_id, claim.token, fallback=True, state=state, error=str(error))
+        # EventBridge retries projection only; it never resubmits the CMA turn.
+        raise
 
 
 def _project_task(
@@ -212,13 +216,10 @@ def _project_task(
     task: a2a.Task,
     *,
     stream_ts: str | None = None,
-    live_token: str | None = None,
     request_id: str | None = None,
     permalink: str | None = None,
-    team_id: str | None = None,
 ) -> str | None:
     repo = runtime.slack_a2a
-    cards = _task_cards_enabled(runtime.config)
     for message in agent_messages(task):
         claim = repo.claim_item(binding_id, task_id, "agent_message", message.message_id)
         if claim.status == "busy":
@@ -233,28 +234,10 @@ def _project_task(
             continue
         try:
             if stream_ts:
-                if cards:
-                    slack.append_stream_chunks(channel_id, stream_ts, [markdown_text_chunk(text)])
-                else:
-                    slack.append_stream(channel_id, stream_ts, text)
-                message_ts = stream_ts
-            elif live_token:
-                projection = repo.get_projection(binding_id, task_id)
-                user_id = str(projection["initiator_user_id"]) if projection else ""
-                if not user_id:
-                    raise RuntimeError("Live projection has no initiating user")
-                if not team_id:
-                    raise RuntimeError("Live projection has no Slack team")
-                stream_ts = slack.start_stream(channel_id, thread_ts, team_id, user_id, text)
-                repo.update_stream_message(binding_id, task_id, live_token, stream_ts)
+                slack.append_stream_chunks(channel_id, stream_ts, [markdown_text_chunk(text)])
                 message_ts = stream_ts
             else:
-                blocks = (
-                    feedback_blocks(task_id, message.message_id)
-                    if runtime.config.slack_feedback_enabled
-                    else []
-                )
-                blocks += source_link_blocks(permalink)
+                blocks = source_link_blocks(permalink)
                 if blocks:
                     # With blocks, top-level text is only the notification/accessibility fallback.
                     blocks = response_text_blocks(text) + blocks
@@ -270,21 +253,26 @@ def _project_task(
     if task.status.state == a2a.TaskState.TASK_STATE_INPUT_REQUIRED:
         for request in requests_from_task(task):
             _project_human_input(runtime, slack, binding_id, task_id, channel_id, thread_ts, request)
+    pending_ids = (
+        {request.request_id for request in requests_from_task(task)}
+        if task.status.state == a2a.TaskState.TASK_STATE_INPUT_REQUIRED
+        else set()
+    )
+    for item in repo.human_input_messages(binding_id, task_id):
+        if item["item_id"] not in pending_ids:
+            slack.update_message(
+                channel_id, item["slack_message_ts"], "This request is no longer pending.", []
+            )
+            repo.close_human_input(binding_id, task_id, item["item_id"])
     status = task_slack_status(task)
     if stream_ts and is_settled(task):
-        blocks = source_link_blocks(permalink) if not cards else []
-        messages = agent_messages(task)
-        if runtime.config.slack_feedback_enabled and messages:
-            blocks += feedback_blocks(task_id, messages[-1].message_id)
         slack.stop_stream(
             channel_id,
             stream_ts,
-            chunks=[completed_task_chunk(request_id or task_id)] if cards and status != "suspended" else None,
-            blocks=blocks or None,
+            chunks=[completed_task_chunk(request_id or task_id)] if status != "suspended" else None,
             status=status,
         )
-    if runtime.config.slack_agent_view_enabled:
-        slack.set_agent_status(channel_id, thread_ts, status)
+    slack.set_agent_status(channel_id, thread_ts, status)
     repo.mark_projection(
         binding_id, task_id, task_state(task), "completed" if is_settled(task) else "pending"
     )
@@ -309,11 +297,8 @@ def _project_human_input(
     assert claim.token
     try:
         if isinstance(request, ToolApprovalRequest):
-            if not runtime.config.slack_tool_approvals_enabled:
-                repo.finish_item(binding_id, task_id, "human_input", request.request_id, claim.token, None)
-                return
             blocks = tool_approval_blocks(
-                task_id, request.request_id, request.tool.name, request.tool.arguments
+                task_id, request.request_id, request.tool.name, request.tool.arguments, request.message
             )
             text = f"Agent wants to run {request.tool.name}"
         else:

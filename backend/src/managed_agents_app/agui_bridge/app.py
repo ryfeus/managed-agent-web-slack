@@ -20,7 +20,7 @@ from managed_agents_app.agui_bridge.history import canonical_history
 from managed_agents_app.agui_bridge.mapper import interrupts_for
 from managed_agents_app.agui_bridge.service import stream_task
 from managed_agents_app.auth import principal_from_cookie
-from managed_agents_app.config import load_config
+from managed_agents_app.config import load_config, local_cors_origins
 from managed_agents_app.protocols.human_input import ClarificationResponse, ToolApprovalResponse
 from managed_agents_app.runtime import Runtime, get_runtime
 
@@ -90,7 +90,7 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
+        allow_origins=local_cors_origins(runtime.config),
         allow_credentials=True,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["content-type"],

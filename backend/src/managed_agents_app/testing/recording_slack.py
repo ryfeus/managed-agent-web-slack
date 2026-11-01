@@ -17,8 +17,6 @@ class RecordingSlack(SlackClient):
         self.streams: dict[str, dict[str, Any]] = {}
         self.reactions: list[dict[str, Any]] = []
         self.statuses: list[dict[str, Any]] = []
-        self.modals: list[dict[str, Any]] = []
-        self.unfurls: list[dict[str, Any]] = []
         self.failures: list[dict[str, Any]] = []
         self.counter = 0
         super().__init__("e2e", raw=cast(Any, _Recorder(self)))
@@ -77,16 +75,6 @@ class RecordingSlack(SlackClient):
                     self.reactions.append(deepcopy(payload))
             elif operation == "agents.sessions.setStatus":
                 self.statuses.append(deepcopy(payload))
-            elif operation == "views.open":
-                self.modals.append(deepcopy(payload))
-            elif operation == "chat.unfurl":
-                self.unfurls.append(deepcopy(payload))
-            elif operation == "conversations.replies":
-                result["messages"] = [
-                    deepcopy(m)
-                    for m in self.messages.values()
-                    if m["channel"] == payload["channel"] and m.get("thread_ts") == payload["ts"]
-                ]
             elif operation == "auth.test":
                 result.update(team_id="T001", user_id="BOT")
             elif operation != "agents.sessions.rename":
@@ -119,8 +107,6 @@ class RecordingSlack(SlackClient):
                     "streams": list(self.streams.values()),
                     "reactions": self.reactions,
                     "agent_statuses": self.statuses,
-                    "modals": self.modals,
-                    "unfurls": self.unfurls,
                 }
             )
 
@@ -132,8 +118,6 @@ class RecordingSlack(SlackClient):
                 self.streams,
                 self.reactions,
                 self.statuses,
-                self.modals,
-                self.unfurls,
                 self.failures,
             ]:
                 cast(Any, collection).clear()

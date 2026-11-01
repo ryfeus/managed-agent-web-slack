@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator
-from contextlib import suppress
 from time import monotonic
 
 from a2a.server.context import ServerCallContext
@@ -20,15 +19,22 @@ from a2a.utils.errors import (
 from managed_agents_app.cma_controller.push_config import PushConfigService
 from managed_agents_app.cma_controller.service import ControllerService
 from managed_agents_app.cma_controller.task_view import TaskViewOptions
+from managed_agents_app.observability import emit
 from managed_agents_app.protocols.controller_profile import HUMAN_INPUT_EXTENSION_URI
 
-_TERMINAL = {
+# INPUT_REQUIRED ends this interaction, but the same Task can be continued.
+_WATCH_BOUNDARY = {
     a2a.TaskState.TASK_STATE_COMPLETED,
     a2a.TaskState.TASK_STATE_FAILED,
     a2a.TaskState.TASK_STATE_CANCELED,
     a2a.TaskState.TASK_STATE_REJECTED,
     a2a.TaskState.TASK_STATE_INPUT_REQUIRED,
 }
+
+
+_WATCH_SECONDS = 800
+_MARKER_SECONDS = 1
+_SNAPSHOT_SECONDS = 5
 
 
 class CmaA2ARequestHandler(RequestHandler):
@@ -65,10 +71,10 @@ class CmaA2ARequestHandler(RequestHandler):
         task = self._snapshot(full, options)
         if params.configuration.HasField("task_push_notification_config"):
             await self._push().create(params.configuration.task_push_notification_config, task.id)
-        if params.configuration.return_immediately or task.status.state in _TERMINAL:
+        if params.configuration.return_immediately or task.status.state in _WATCH_BOUNDARY:
             return task
         async for event in self._watch(task, options, full):
-            if isinstance(event, a2a.TaskStatusUpdateEvent) and event.status.state in _TERMINAL:
+            if isinstance(event, a2a.TaskStatusUpdateEvent) and event.status.state in _WATCH_BOUNDARY:
                 return await self.service.get_task(task.id, options=options)
         return await self.service.get_task(task.id, options=options)
 
@@ -131,75 +137,49 @@ class CmaA2ARequestHandler(RequestHandler):
         self, initial: a2a.Task, options: TaskViewOptions, baseline: a2a.Task
     ) -> AsyncGenerator[Event]:
         yield initial
-        if initial.status.state in _TERMINAL:
+        if initial.status.state in _WATCH_BOUNDARY:
             return
         live_options = TaskViewOptions(enabled_extensions=options.enabled_extensions)
         emitted = {message.message_id for message in baseline.history if message.role == a2a.Role.ROLE_AGENT}
         last_status = initial.status.SerializeToString(deterministic=True)
         marker: tuple[object, str, str | None, str | None] | None = None
-        hints: asyncio.Queue[bool] = asyncio.Queue(maxsize=32)
-        stream: asyncio.Task[None] | None = None
-        stream_session: str | None = None
-        next_stream_at = 0.0
-        next_snapshot_at = monotonic() + 5
+        deadline = monotonic() + _WATCH_SECONDS
+        next_snapshot_at = monotonic() + _SNAPSHOT_SECONDS
 
-        async def pump(session_id: str) -> None:
-            try:
-                async for event in self.service.provider.stream_events(session_id):
-                    kind = str(event.get("type", ""))
-                    if kind.startswith("agent.thinking"):
-                        continue
-                    if not hints.full():
-                        hints.put_nowait(True)
-            except Exception:
-                # The durable snapshot path is the reconnect fallback.
-                pass
-            finally:
-                if not hints.full():
-                    hints.put_nowait(True)
-
+        emit("watch_started", task_id=initial.id, initial_state=a2a.TaskState.Name(initial.status.state))
         try:
-            while True:
-                now = monotonic()
+            while monotonic() < deadline:
                 current_marker = await self.service.watch_marker(initial.id)
-                session_id = current_marker[3] if current_marker[2] else None
-                if session_id and (stream is None or stream.done()) and now >= next_stream_at:
-                    stream_session = session_id
-                    stream = asyncio.create_task(pump(session_id))
-                    next_stream_at = now + 2
-                elif stream is not None and stream_session != session_id:
-                    stream.cancel()
-                    stream = None
-                    stream_session = None
-                changed = current_marker != marker
-                hinted = False
-                if not changed and now < next_snapshot_at:
-                    with suppress(TimeoutError):
-                        hinted = await asyncio.wait_for(hints.get(), timeout=1)
-                    current_marker = await self.service.watch_marker(initial.id)
-                    changed = current_marker != marker
-                if not (changed or hinted or monotonic() >= next_snapshot_at):
+                if current_marker == marker and monotonic() < next_snapshot_at:
+                    await asyncio.sleep(_MARKER_SECONDS)
                     continue
+                # A message may be persisted before the scheduler changes the marker.
+                # Periodic full reads keep A2A progress independent of CMA SSE.
                 current = await self.service.get_task(initial.id, options=live_options)
+                emit("watch_snapshot", task_id=initial.id, state=a2a.TaskState.Name(current.status.state))
                 for message in current.history:
                     if message.role == a2a.Role.ROLE_AGENT and message.message_id not in emitted:
                         emitted.add(message.message_id)
+                        emit("watch_yield_message", task_id=initial.id)
                         yield message
+                        emit("watch_message_consumed", task_id=initial.id)
                 status = current.status.SerializeToString(deterministic=True)
                 if status != last_status:
+                    emit(
+                        "watch_yield_status",
+                        task_id=initial.id,
+                        state=a2a.TaskState.Name(current.status.state),
+                    )
                     yield a2a.TaskStatusUpdateEvent(
                         task_id=current.id, context_id=current.context_id, status=current.status
                     )
                     last_status = status
                 marker = current_marker
-                next_snapshot_at = monotonic() + 5
-                if current.status.state in _TERMINAL:
+                next_snapshot_at = monotonic() + _SNAPSHOT_SECONDS
+                if current.status.state in _WATCH_BOUNDARY:
                     return
         finally:
-            if stream is not None:
-                stream.cancel()
-                with suppress(asyncio.CancelledError):
-                    await stream
+            emit("watch_closed", task_id=initial.id)
 
     async def on_create_task_push_notification_config(
         self, params: a2a.TaskPushNotificationConfig, context: ServerCallContext

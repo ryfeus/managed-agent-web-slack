@@ -39,4 +39,5 @@ async def canonical_history(service: ThreadAgentService, thread_id: str) -> dict
         "activeTaskId": active.id if active else None,
         "activeTaskState": a2a.TaskState.Name(active.status.state) if active else None,
         "hasPendingInterrupts": bool(active and interrupts_for(active)),
+        "pendingRequestIds": [item.id for item in interrupts_for(active)] if active else [],
     }

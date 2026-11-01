@@ -1,10 +1,12 @@
-"""Leased, level-triggered A2A push delivery."""
+"""Leased A2A callbacks with bounded, explicitly queued retries."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import logging
+import math
+from datetime import UTC, datetime
 
 import httpx
 from a2a.types import a2a_pb2 as a2a
@@ -35,26 +37,58 @@ class PushDispatcher:
 
     async def run_context(self, context_id: str) -> None:
         rows = await asyncio.to_thread(self.repository.list_context, context_id)
+        delays = []
         for row in rows:
-            await self._deliver(str(row["task_id"]), str(row["config_id"]))
+            if (
+                row["a2a_state"] in {"COMPLETED", "CANCELED", "FAILED", "REJECTED"}
+                and row["last_delivered_fingerprint"]
+            ):
+                # Duplicate terminal wakeups must not compete for leases and create
+                # more wakeups. Compare canonical content; state alone is insufficient.
+                try:
+                    task = await self.service.get_task(
+                        str(row["task_id"]), options=TaskViewOptions(history_length=1)
+                    )
+                    fingerprint = hashlib.sha256(
+                        a2a.StreamResponse(task=task).SerializeToString(deterministic=True)
+                    ).hexdigest()
+                    if row["last_delivered_fingerprint"] == fingerprint:
+                        continue
+                except Exception:
+                    # Unreadable/changed snapshots use the normal bounded delivery path.
+                    pass
+            delay = await self._deliver(str(row["task_id"]), str(row["config_id"]))
+            if delay is not None:
+                delays.append(delay)
+        if delays:
+            # Enqueue errors must fail the SQS record. A redelivery before the due
+            # time requeues the remaining delay instead of acknowledging lost work.
+            await asyncio.to_thread(self.trigger.schedule_context, context_id, "push-retry", min(delays))
 
-    async def _deliver(self, task_id: str, config_id: str) -> None:
+    async def _deliver(self, task_id: str, config_id: str) -> int | None:
         claim = await asyncio.to_thread(self.repository.claim, task_id, config_id)
         if claim is None:
-            return
+            row = await asyncio.to_thread(self.repository.get, task_id, config_id)
+            if row is None or row["permanent_failure_at"] is not None:
+                return None
+            due = [row[key] for key in ("next_attempt_at", "delivery_lease_expires_at") if row[key]]
+            return min(900, max(1, math.ceil((max(due) - datetime.now(UTC)).total_seconds()))) if due else 1
         try:
             row = await asyncio.to_thread(self.repository.get, task_id, config_id)
-            if row is None or not await asyncio.to_thread(self.repository.claimed, task_id, config_id, claim):
-                return
-            task = await self.service.get_task(task_id, options=TaskViewOptions(history_length=1))
-            envelope = a2a.StreamResponse(task=task)
-            fingerprint = hashlib.sha256(envelope.SerializeToString(deterministic=True)).hexdigest()
-            if row["last_delivered_fingerprint"] == fingerprint:
-                return
-            delivery_id = hashlib.sha256(f"{config_id}\x00{task_id}\x00{fingerprint}".encode()).hexdigest()
-            if not await asyncio.to_thread(self.repository.claimed, task_id, config_id, claim):
-                return
+            if row is None:
+                return None
             try:
+                task = await self.service.get_task(task_id, options=TaskViewOptions(history_length=1))
+                envelope = a2a.StreamResponse(task=task)
+                fingerprint = hashlib.sha256(envelope.SerializeToString(deterministic=True)).hexdigest()
+                if row["last_delivered_fingerprint"] == fingerprint:
+                    return None
+                delivery_id = hashlib.sha256(
+                    f"{config_id}\x00{task_id}\x00{fingerprint}".encode()
+                ).hexdigest()
+                # Recheck once after the provider read, including a concurrent delete.
+                if not await asyncio.to_thread(self.repository.claimed, task_id, config_id, claim):
+                    return 1
                 response = await self.http.post(
                     str(row["url"]),
                     content=MessageToJson(envelope).encode(),
@@ -62,45 +96,33 @@ class PushDispatcher:
                     timeout=10,
                     follow_redirects=False,
                 )
+            except Exception:
+                logger.exception(
+                    "a2a_push_dispatch_failed", extra={"task_id": task_id, "config_id": config_id}
+                )
+                transient = True
+            else:
                 if 200 <= response.status_code < 300:
-                    await asyncio.to_thread(
+                    finished = await asyncio.to_thread(
                         self.repository.finish, task_id, config_id, claim, fingerprint=fingerprint
                     )
-                    return
+                    return None if finished else 1
                 transient = response.status_code in {408, 429} or response.status_code >= 500
-            except httpx.HTTPError:
-                transient = True
             attempts = int(row["attempt_count"] or 0)
-            delay = _BACKOFF[min(attempts, len(_BACKOFF) - 1)] if transient else None
-            await asyncio.to_thread(
+            delay = _BACKOFF[attempts] if transient and attempts < len(_BACKOFF) else None
+            finished = await asyncio.to_thread(
                 self.repository.finish,
                 task_id,
                 config_id,
                 claim,
                 fingerprint=None,
                 retry_seconds=delay,
-                permanent=not transient,
+                permanent=delay is None,
             )
-            if transient:
+            if delay is not None:
                 logger.warning("a2a_push_retry", extra={"task_id": task_id, "config_id": config_id})
             else:
                 logger.error("a2a_push_permanent_failure", extra={"task_id": task_id, "config_id": config_id})
-        except Exception:
-            logger.exception("a2a_push_dispatch_failed", extra={"task_id": task_id, "config_id": config_id})
-            await asyncio.to_thread(
-                self.repository.finish, task_id, config_id, claim, fingerprint=None, retry_seconds=5
-            )
+            return delay if finished else 1
         finally:
             await asyncio.to_thread(self.repository.release, task_id, config_id, claim)
-
-    async def maintenance(self) -> int:
-        total = 0
-        after = ""
-        while True:
-            contexts = await asyncio.to_thread(self.repository.contexts_for_maintenance, after)
-            for context_id in contexts:
-                self.trigger.schedule_context(context_id, "push-maintenance")
-            total += len(contexts)
-            if len(contexts) < 500:
-                return total
-            after = contexts[-1]

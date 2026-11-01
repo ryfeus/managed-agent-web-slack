@@ -87,8 +87,10 @@ def test_malformed_and_signed_interaction_payloads(runtime, monkeypatch, config)
     invalid = slack_ingress.handler(signed_event("{", "slack-secret"), None)
     assert invalid["statusCode"] == 400
     payload = {
-        "type": "message_action",
-        "callback_id": "investigate",
+        "type": "block_actions",
+        "actions": [
+            {"action_id": "agent_tool_allow", "value": json.dumps({"taskId": "task", "requestId": "review"})}
+        ],
         "team": {"id": "T1"},
         "user": {"id": "U1"},
         "channel": {"id": "C1"},
@@ -99,4 +101,4 @@ def test_malformed_and_signed_interaction_payloads(runtime, monkeypatch, config)
     event["path"] = "/slack/interactions"
     event["headers"]["content-type"] = "application/x-www-form-urlencoded"
     result = slack_ingress.handler(event, None)
-    assert result["statusCode"] == 200 and emitted[-1][1] == "SlackShortcutReceived"
+    assert result["statusCode"] == 200 and emitted[-1][1] == "SlackToolConfirmationRequested"

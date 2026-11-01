@@ -36,7 +36,7 @@ def state():
                 "controller_state": "COMPLETED",
                 "projection_status": "completed",
                 "task_state": "COMPLETED",
-                "push_receipts": index,
+                "push_delivered": bool(index),
             }
             for index in (1, 2)
         ],
@@ -217,7 +217,8 @@ def test_smoke_posts_real_user_turns_and_reuses_inspector(monkeypatch):
         posted.append((token, channel, text, thread_ts))
         return {"channel": channel, "ts": "1.1" if thread_ts else "1.0", "thread_ts": thread_ts or "1.0"}
 
-    def thread(_token, _channel, _root):
+    def thread(token, _channel, _root):
+        assert token == "xoxp-local"
         first = posted[0][2].split()[-1]
         messages = [message("1.0", "U1", posted[0][2]), message("1.2", "U2", first)]
         if len(posted) == 2:
@@ -238,6 +239,19 @@ def test_smoke_posts_real_user_turns_and_reuses_inspector(monkeypatch):
     assert json.dumps(report).find("xoxp-local") == -1
 
 
+@pytest.mark.parametrize("missing", ["SLACK_USER_TOKEN", "SLACK_BOT_TOKEN"])
+def test_smoke_missing_token_fails_before_any_slack_request(monkeypatch, missing):
+    monkeypatch.setenv("SLACK_USER_TOKEN", "xoxp-secret")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-secret")
+    monkeypatch.delenv(missing)
+    api = Mock()
+    with pytest.raises(slack_user.SmokeFailure, match=missing) as error:
+        slack_user.smoke(api)
+    assert "xoxp-secret" not in str(error.value)
+    assert "xoxb-secret" not in str(error.value)
+    assert api.mock_calls == []
+
+
 def test_smoke_failure_preserves_identifiers_without_token(monkeypatch):
     monkeypatch.setenv("SLACK_USER_TOKEN", "xoxp-secret")
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-secret")
@@ -250,3 +264,14 @@ def test_smoke_failure_preserves_identifiers_without_token(monkeypatch):
     assert error.value.boundary == "user_auth"
     assert "xoxp-secret" not in str(error.value)
     assert "run_id" in str(error.value)
+
+
+def test_auth_retains_installed_scopes_only_in_memory():
+    response = httpx.Response(
+        200,
+        json={"ok": True, "team_id": "T1", "user_id": "U1"},
+        headers={"x-oauth-scopes": "identify,chat:write,channels:history"},
+    )
+    api = slack_user.SlackApi(Mock(post=Mock(return_value=response)))
+    assert api.auth("fixture-token")["user_id"] == "U1"
+    assert api.scopes_by_token["fixture-token"] == {"identify", "chat:write", "channels:history"}

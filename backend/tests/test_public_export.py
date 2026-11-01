@@ -77,21 +77,22 @@ def test_public_export_rejects_unsafe_or_nonempty_destinations(tmp_path: Path) -
         exporter.export_tree(source, source / "public")
 
 
-def test_exported_tree_passes_strict_scan_and_detects_injected_secret(tmp_path: Path) -> None:
+def test_public_export_uses_only_tracked_files_and_rejects_symlinks(tmp_path):
+    import subprocess
+
     exporter = load_script("export_public_tree.py")
-    checker = load_script("check_public_readiness.py")
     source = tmp_path / "source"
     source.mkdir()
-    (source / "README.md").write_text("public", encoding="utf-8")
-    exporter.tracked_paths = lambda root: [Path("README.md")]
+    subprocess.run(["git", "init", "--quiet", str(source)], check=True)
+    (source / "README.md").write_text("public")
+    (source / "untracked.txt").write_text("local-only")
+    (source / "apps/web").mkdir(parents=True)
+    (source / "apps/web/.env.local").write_text("local-only")
+    subprocess.run(["git", "-C", str(source), "add", "README.md", "apps/web/.env.local"], check=True)
     output = tmp_path / "public"
-    exporter.export_tree(source, output)
-
-    assert checker.scan_paths(output, checker.public_tree_paths(output), allow_private_paths=False) == []
-    (output / "README.md").write_text(
-        "".join(("xoxb-", "123456789012-123456789012-abcdefghijklmnopqrstuv")), encoding="utf-8"
-    )
-    assert any(
-        "credential-shaped" in error
-        for error in checker.scan_paths(output, checker.public_tree_paths(output), allow_private_paths=False)
-    )
+    assert exporter.export_tree(source, output) == [Path("README.md")]
+    assert not (output / "untracked.txt").exists()
+    (source / "linked").symlink_to(source / "untracked.txt")
+    subprocess.run(["git", "-C", str(source), "add", "linked"], check=True)
+    with pytest.raises(ValueError, match="symlink"):
+        exporter.export_tree(source, tmp_path / "unsafe")

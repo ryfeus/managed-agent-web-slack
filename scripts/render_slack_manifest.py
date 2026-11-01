@@ -23,8 +23,8 @@ def normalize_public_app_url(value: str) -> tuple[str, str]:
 
 
 def render_manifest(template: str, public_app_url: str) -> str:
-    origin, host = normalize_public_app_url(public_app_url)
-    result = template.replace("__PUBLIC_APP_URL__", origin).replace("__PUBLIC_APP_HOST__", host)
+    origin, _ = normalize_public_app_url(public_app_url)
+    result = template.replace("__PUBLIC_APP_URL__", origin)
     if "__PUBLIC_APP_" in result:
         raise ValueError("Slack manifest template contains an unresolved public application placeholder")
     return result

@@ -25,17 +25,21 @@ def db():
 
 
 def test_migrations_are_repeatable_and_transactions_rollback(db):
-    from managed_agents_app.operations import migrate
+    from managed_agents_app.operations import MIGRATIONS, migrate
 
     migrate()
     migrate()
     with connect(db.config) as conn:
-        assert len(conn.execute("SELECT version FROM schema_migrations").fetchall()) == 8
+        assert len(conn.execute("SELECT version FROM schema_migrations").fetchall()) == len(
+            list(MIGRATIONS.glob("*.sql"))
+        )
     with pytest.raises(RuntimeError), connect(db.config) as conn:
         conn.execute("INSERT INTO principals(principal_id) VALUES ('00000000-0000-4000-8000-000000000099')")
         raise RuntimeError("rollback")
     with connect(db.config) as conn:
-        assert not conn.execute("SELECT * FROM principals").fetchall()
+        assert not conn.execute(
+            "SELECT * FROM principals WHERE principal_id = '00000000-0000-4000-8000-000000000099'"
+        ).fetchall()
 
 
 def test_phase_five_rows_survive_destructive_migration_008(db):
@@ -399,3 +403,252 @@ def test_logical_send_check_rejects_impossible_state(db, status, task_id):
             "UPDATE agent_tasks SET submission_status = %s, task_id = %s WHERE task_binding_id = %s",
             (status, task_id, send["task_binding_id"]),
         )
+
+
+def test_migration_010_preserves_routing_sender_and_slack_state(db):
+    from managed_agents_app.operations import MIGRATIONS, _statements
+
+    schema = f"thin_push_{uuid.uuid4().hex}"
+    principal, thread, binding = (str(uuid.uuid4()) for _ in range(3))
+    with connect(db.config) as conn:
+        conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+        conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        try:
+            for path in sorted(MIGRATIONS.glob("*.sql")):
+                if path.name.startswith("010_"):
+                    break
+                for statement in _statements(path.read_text()):
+                    conn.execute(statement)
+            conn.execute("INSERT INTO principals (principal_id) VALUES (%s)", (principal,))
+            conn.execute(
+                "INSERT INTO agent_threads (thread_id, principal_id, agent_id, "
+                "context_id, context_state) VALUES (%s, %s, 'cma', 'context', 'ready')",
+                (thread, principal),
+            )
+            conn.execute(
+                "INSERT INTO cma_contexts (context_id, creation_message_id, cma_session_id, "
+                "lifecycle_state) VALUES ('context', 'message', 'private-session', 'ready')"
+            )
+            conn.execute(
+                "INSERT INTO cma_tasks (task_id, context_id, message_id, sequence, "
+                "a2a_state, internal_state) VALUES ('task', 'context', 'message', 1, "
+                "'COMPLETED', 'terminal')"
+            )
+            conn.execute(
+                "INSERT INTO agent_tasks (task_binding_id, thread_id, agent_id, "
+                "client_message_id, task_id, submission_status, last_seen_task_state) "
+                "VALUES (%s, %s, 'cma', 'message', 'task', 'bound', 'COMPLETED')",
+                (str(uuid.uuid4()), thread),
+            )
+            conn.execute(
+                "INSERT INTO cma_push_configs (task_id, config_id, url, "
+                "last_delivered_fingerprint) VALUES ('task', 'config', 'http://sink', "
+                "'fingerprint')"
+            )
+            conn.execute(
+                "INSERT INTO a2a_task_event_receipts (receipt_id, agent_id, task_id, "
+                "thread_id, context_id, delivery_id, event_kind) VALUES (%s, 'cma', "
+                "'task', %s, 'context', 'delivery', 'task')",
+                (str(uuid.uuid4()), thread),
+            )
+            conn.execute("INSERT INTO a2a_task_observation_claims (agent_id, task_id) VALUES ('cma', 'task')")
+            conn.execute(
+                "INSERT INTO thread_surface_bindings (binding_id, thread_id, surface, "
+                "tenant_id, external_thread_id) VALUES (%s, %s, 'slack', 'T', 'C:1')",
+                (binding, thread),
+            )
+            conn.execute(
+                "INSERT INTO slack_task_projections (binding_id, task_id, status) VALUES "
+                "(%s, 'task', 'completed')",
+                (binding,),
+            )
+            conn.execute(
+                "INSERT INTO slack_projection_items (binding_id, task_id, item_kind, "
+                "item_id, status) VALUES (%s, 'task', 'agent_message', 'message', "
+                "'posted')",
+                (binding,),
+            )
+            for _ in range(2):
+                for statement in _statements((MIGRATIONS / "010_thin_a2a_push_receiver.sql").read_text()):
+                    conn.execute(statement)
+            remaining = {
+                r["tablename"]
+                for r in conn.execute(
+                    "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = %s", (schema,)
+                )
+            }
+            assert not remaining.intersection({"a2a_task_event_receipts", "a2a_task_observation_claims"})
+            assert conn.execute("SELECT task_id FROM agent_tasks").fetchone()["task_id"] == "task"
+            assert "last_seen_task_state" not in conn.execute("SELECT * FROM agent_tasks").fetchone()
+            assert (
+                conn.execute("SELECT last_delivered_fingerprint FROM cma_push_configs").fetchone()[
+                    "last_delivered_fingerprint"
+                ]
+                == "fingerprint"
+            )
+            assert (
+                conn.execute("SELECT status FROM slack_task_projections").fetchone()["status"] == "completed"
+            )
+            assert conn.execute("SELECT status FROM slack_projection_items").fetchone()["status"] == "posted"
+        finally:
+            # The fixture and its schema share this transaction, including on SQL failure.
+            conn.rollback()
+
+
+@pytest.mark.parametrize("interrupted_after", [1, 2, 3, 4])
+def test_migration_011_preserves_decisions_and_partial_reruns(db, monkeypatch, interrupted_after):
+    from managed_agents_app import operations
+
+    schema = f"stateless_{uuid.uuid4().hex}"
+    original_connect = operations.connect
+
+    def isolated_connect(config, role=None):
+        conn = original_connect(config, role)
+        conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+        return conn
+
+    # Own a separate schema so each DSQL-style statement can commit independently.
+    with connect(db.config) as conn:
+        conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    monkeypatch.setattr(operations, "connect", isolated_connect)
+    try:
+        with isolated_connect(db.config) as conn:
+            for path in sorted(operations.MIGRATIONS.glob("*.sql")):
+                if path.name.startswith("011_"):
+                    break
+                for statement in operations._statements(path.read_text()):
+                    conn.execute(statement)
+            # name, status, decision, attempted, request revision, context revision, key, cancel, reset
+            cases = [
+                ("allow", "resolving", "allow", False, 1, 2, "opaque", False, False),
+                ("deny", "resolving", "deny", False, 2, 2, "opaque", False, False),
+                ("missing", "resolving", "allow", False, None, 2, "opaque", False, True),
+                ("future", "resolving", "allow", False, 3, 2, "opaque", False, True),
+                ("zero", "resolving", "deny", False, 0, 0, "opaque", False, True),
+                ("keyless", "resolving", "allow", False, 1, 2, None, False, True),
+                ("empty-key", "resolving", "deny", False, 1, 2, "", False, True),
+                ("null-context", "resolving", "allow", False, 1, None, "opaque", False, True),
+                ("no-decision", "resolving", None, False, 1, 2, "opaque", False, True),
+                ("cancel-deny", "resolving", "deny", False, None, 0, None, True, False),
+                ("cancel-allow", "resolving", "allow", False, None, 0, None, True, True),
+                ("attempted", "resolving", "allow", True, None, 0, None, False, False),
+                ("attempted-deny", "resolving", "deny", True, 3, 2, None, False, False),
+                ("attempted-null", "resolving", None, True, None, 0, None, False, False),
+                ("resolved", "resolved", "allow", True, 1, 2, "opaque", False, False),
+                ("resolved-legacy", "resolved", "deny", False, None, 0, None, False, False),
+                ("pending", "pending", None, False, None, 0, None, False, False),
+            ]
+            for name, status, decision, attempted, revision, context_revision, key, cancel, _reset in cases:
+                conn.execute(
+                    "INSERT INTO cma_contexts (context_id, creation_message_id, cma_session_id, "
+                    "lifecycle_state, "
+                    "active_task_id, policy_snapshot_key, policy_snapshot_revision) VALUES (%s, %s, %s, "
+                    "'ready', %s, %s, %s)",
+                    (name, name, name, name, key, context_revision),
+                )
+                conn.execute(
+                    "INSERT INTO cma_tasks (task_id, context_id, message_id, sequence, a2a_state, "
+                    "internal_state, "
+                    "held_reason, cancel_requested_at) VALUES (%s, %s, %s, 1, 'WORKING', 'waiting', %s, "
+                    "CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END)",
+                    (name, name, name, "ambiguous-confirmation" if attempted else None, cancel),
+                )
+                conn.execute(
+                    "INSERT INTO cma_input_requests (request_id, task_id, cma_event_id, kind, status, "
+                    "decision, "
+                    "confirmation_attempted_at, policy_snapshot_revision) VALUES (%s, %s, %s, "
+                    "'tool_approval', %s, %s, "
+                    "CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE NULL END, %s)",
+                    (name, name, name, status, decision, attempted, revision),
+                )
+            principal, thread, binding = (str(uuid.uuid4()) for _ in range(3))
+            conn.execute("INSERT INTO principals (principal_id) VALUES (%s)", (principal,))
+            conn.execute(
+                "INSERT INTO agent_threads (thread_id, principal_id, agent_id, context_id, "
+                "context_state) VALUES (%s, %s, 'cma', 'allow', 'ready')",
+                (thread, principal),
+            )
+            conn.execute(
+                "INSERT INTO agent_tasks (task_binding_id, thread_id, agent_id, client_message_id, "
+                "task_id, submission_status) VALUES (%s, %s, 'cma', 'allow', 'allow', 'bound')",
+                (str(uuid.uuid4()), thread),
+            )
+            conn.execute(
+                "INSERT INTO thread_surface_bindings (binding_id, thread_id, surface, tenant_id, "
+                "external_thread_id) VALUES (%s, %s, 'slack', 'T', 'C:1')",
+                (binding, thread),
+            )
+            conn.execute(
+                "INSERT INTO cma_clarification_requests (request_id, task_id, cma_event_id, status) "
+                "VALUES ('human', 'allow', 'question', 'pending')"
+            )
+            preserved_tables = [
+                "cma_tasks",
+                "agent_threads",
+                "agent_tasks",
+                "thread_surface_bindings",
+                "cma_clarification_requests",
+            ]
+            before = {
+                table: conn.execute(
+                    sql.SQL("SELECT * FROM {} ORDER BY 1").format(sql.Identifier(table))
+                ).fetchall()
+                for table in preserved_tables
+            }
+            original_requests = {r["request_id"]: r for r in conn.execute("SELECT * FROM cma_input_requests")}
+
+        path = operations.MIGRATIONS / "011_stateless_openappa.sql"
+        statements = operations._statements(path.read_text())
+        for statement in statements[:interrupted_after]:
+            operations._execute_migration_statement(db.config, statement, migration=path.name)
+        # Resume after every possible interruption; the whole migration may be retried.
+        for _ in range(2):
+            for statement in statements:
+                operations._execute_migration_statement(db.config, statement, migration=path.name)
+        with isolated_connect(db.config) as conn:
+            rows = {r["request_id"]: r for r in conn.execute("SELECT * FROM cma_input_requests")}
+            for name, status, decision, _attempted, _revision, _cr, _key, _cancel, reset in cases:
+                row = rows[name]
+                assert row["status"] == ("pending" if reset else status)
+                assert row["decision"] == (None if reset else decision)
+                assert (
+                    row["confirmation_attempted_at"] == original_requests[name]["confirmation_attempted_at"]
+                )
+                assert "policy_snapshot_revision" not in row
+            assert not any(
+                column.startswith("policy_snapshot")
+                for column in conn.execute("SELECT * FROM cma_contexts LIMIT 1").fetchone()
+            )
+            for table in preserved_tables:
+                assert (
+                    conn.execute(
+                        sql.SQL("SELECT * FROM {} ORDER BY 1").format(sql.Identifier(table))
+                    ).fetchall()
+                    == before[table]
+                )
+    finally:
+        with original_connect(db.config) as conn:
+            conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_metadata_schema_has_no_transcript_or_tool_body_columns():
+    config = load_config()
+    validate_local_database(config)
+    with connect(config) as conn:
+        columns = conn.execute(
+            "SELECT table_name, column_name FROM information_schema.columns WHERE "
+            "table_schema = current_schema()"
+        ).fetchall()
+    forbidden = {
+        "transcript",
+        "messages",
+        "message_body",
+        "tool_output",
+        "tool_input",
+        "arguments",
+        "reasoning",
+        "content",
+        "review_text",
+        "review_description",
+    }
+    assert not [(row["table_name"], row["column_name"]) for row in columns if row["column_name"] in forbidden]

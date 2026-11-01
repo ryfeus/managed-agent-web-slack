@@ -33,6 +33,7 @@ type History = {
   activeTaskId: string | null;
   activeTaskState: string | null;
   hasPendingInterrupts: boolean;
+  pendingRequestIds: string[];
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "";
@@ -232,7 +233,7 @@ async function* resumeTask(
             const hasNewMessage = Array.isArray(event.messages) && event.messages.some(
               (message: { id?: unknown }) => typeof message.id === "string" && !loadedMessageIds.has(message.id)
             );
-            if (hasNewMessage) {
+            if (hasNewMessage || text) {
               reconnect = true;
               reconcile();
               return;
@@ -240,20 +241,11 @@ async function* resumeTask(
           } else if (event.type === "TEXT_MESSAGE_CONTENT") {
             text += event.delta;
             yield { content: [{ type: "text", text }] };
-          } else if (event.type === "RUN_FINISHED" && event.outcome?.type === "interrupt") {
-            yield {
-              content: text ? [{ type: "text", text }] : [],
-              status: { type: "requires-action", reason: "interrupt" },
-              metadata: { custom: { agui: { interrupts: event.outcome.interrupts } } }
-            };
-          } else if (event.type === "RUN_FINISHED" && event.outcome?.type === "cancelled") {
-            if (!text) {
-              reconnect = true;
-              reconcile();
-              return;
-            }
-            yield { content: text ? [{ type: "text", text }] : [], status: { type: "incomplete", reason: "cancelled" } };
-          } else if (event.type === "RUN_FINISHED" && !text && event.outcome?.type === "success") {
+          } else if (event.type === "RUN_FINISHED") {
+            reconnect = true;
+            reconcile();
+            return;
+          } else if (event.type === "RUN_ERROR" && ["STREAM_RECONNECT_REQUIRED", "TASK_CANCELLED"].includes(event.code)) {
             reconnect = true;
             reconcile();
             return;
@@ -264,6 +256,7 @@ async function* resumeTask(
         boundary = buffer.indexOf("\n\n");
       }
     }
+    if (!options.abortSignal.aborted) reconcile();
   } finally {
     if (reconnect) await reader.cancel().catch(() => undefined);
     reader.releaseLock();
@@ -339,7 +332,7 @@ function AgUiThreadRuntime({ threadId, threads, onSelect, onCreate, onUpdate, on
     showThinking: false,
     autoCancelPendingToolCalls: false,
     resumeTranscript: "appended",
-    onError: (reason) => setError(reason.message),
+    onError: (reason) => { setError(reason.message); onReconcile(); },
     adapters: { history, threadList }
   });
   return (
@@ -354,7 +347,7 @@ function AgUiThreadRuntime({ threadId, threads, onSelect, onCreate, onUpdate, on
             </div>
           </ThreadPrimitive.Empty>
           <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
-          <InterruptPanel />
+          <InterruptPanel threadId={threadId} onReconcile={onReconcile} />
           {error && <p className="transport-error">{error}</p>}
           <Composer threadId={threadId} stopLocal={() => runtime.thread.cancelRun()} onReconcile={onReconcile} />
         </ThreadPrimitive.Viewport>
@@ -371,12 +364,30 @@ function AssistantMessage() {
   return <MessagePrimitive.Root className="message assistant-message"><div className="message-label">Claude</div><MessagePrimitive.Content /></MessagePrimitive.Root>;
 }
 
-function InterruptPanel() {
+function InterruptPanel({ threadId, onReconcile }: { threadId: string; onReconcile: () => void }) {
   const interrupts = useAgUiInterrupts();
   const submit = useAgUiSubmitInterruptResponses();
   const [decisions, setDecisions] = useState<Record<string, unknown>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const pendingIds = interrupts.map((item) => item.id).sort().join(",");
+  useEffect(() => {
+    if (!pendingIds || submitting) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const reconcilePending = async () => {
+      try {
+        const current = await api<History>(`/api/agui/threads/${threadId}/history`);
+        if (active && [...current.pendingRequestIds].sort().join(",") !== pendingIds) {
+          onReconcile();
+          return;
+        }
+      } catch { /* Keep controls during a transport outage; admission still checks ownership/state. */ }
+      if (active) timer = setTimeout(() => void reconcilePending(), 2000);
+    };
+    timer = setTimeout(() => void reconcilePending(), 2000);
+    return () => { active = false; clearTimeout(timer); };
+  }, [pendingIds, submitting, threadId, onReconcile]);
   if (interrupts.length === 0) return null;
   const allAnswered = interrupts.every((item) => decisions[item.id] !== undefined);
   return (
@@ -387,14 +398,10 @@ function InterruptPanel() {
         return <div key={item.id} className="tool-call">
           <div className="tool-call-header"><strong>{tool ? "Tool request" : "Question"}</strong>{tool && <code>{tool.name}</code>}</div>
           {tool && <pre>{JSON.stringify(tool.arguments, null, 2)}</pre>}
-          {!tool && <p>{item.message}</p>}
+          <p>{item.message}</p>
           {tool ? <div className="tool-actions">
             <button type="button" onClick={() => setDecisions((value) => ({ ...value, [item.id]: { decision: "allow" } }))}>Allow</button>
             <button type="button" className="deny" onClick={() => setDecisions((value) => ({ ...value, [item.id]: { decision: "deny" } }))}>Deny</button>
-            <input aria-label={`Denial reason for ${tool.name}`} placeholder="Optional denial reason" onChange={(event) => {
-              const reason = event.target.value;
-              setDecisions((value) => ({ ...value, [item.id]: { decision: "deny", reason } }));
-            }} />
           </div> : <div>
             {Array.isArray(metadata.choices) && <select aria-label="Suggested answer" onChange={(event) => {
               setDecisions((value) => ({ ...value, [item.id]: { answer: event.target.value } }));

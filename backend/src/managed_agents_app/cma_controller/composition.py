@@ -10,6 +10,7 @@ import httpx
 
 from managed_agents_app.cma_controller.pending_input import FilePendingInputStore, PendingInputStore
 from managed_agents_app.cma_controller.pending_input_s3 import S3PendingInputStore
+from managed_agents_app.cma_controller.preview import production_preview_trigger
 from managed_agents_app.cma_controller.provider import AnthropicCmaProvider, CmaProvider
 from managed_agents_app.cma_controller.push_config import PushConfigService
 from managed_agents_app.cma_controller.push_dispatcher import PushDispatcher
@@ -22,6 +23,8 @@ from managed_agents_app.cma_controller.trigger import AsyncLocalSchedulerTrigger
 from managed_agents_app.cma_controller.trigger_sqs import production_push_trigger, production_trigger
 from managed_agents_app.config import AppConfig
 from managed_agents_app.managed_agent.client import ManagedAgentClient
+from managed_agents_app.policy.models import ToolPolicyEngine
+from managed_agents_app.policy.openappa import OpenAppaPolicyEngine
 
 
 @dataclass
@@ -53,6 +56,7 @@ def build_controller(
     push_trigger: PushTrigger | None = None,
     push_http: httpx.AsyncClient | None = None,
     with_dispatcher: bool = True,
+    policy_engine: ToolPolicyEngine | None = None,
 ) -> ControllerComposition:
     repository = repository or ControllerRuntimeRepository(config)
     provider = provider or AnthropicCmaProvider(ManagedAgentClient(config))
@@ -81,7 +85,29 @@ def build_controller(
         raise RuntimeError("Push callback policy requires a runnable push worker")
 
     service = ControllerService(repository, provider, pending_input, scheduler_trigger, push_trigger)
-    scheduler = CmaScheduler(repository, provider, pending_input, scheduler_trigger, push_trigger)
+    policy_directory = Path(__file__).resolve().parents[1] / "policy"
+    policy_engine = policy_engine or OpenAppaPolicyEngine(
+        config.openappa_binary_path
+        or str(
+            policy_directory / "openappa-cma"
+            if (policy_directory / "openappa-cma").exists()
+            else Path(__file__).resolve().parents[4] / ".generated/openappa-bin/openappa-cma"
+        ),
+        config.openappa_policy_path or str(policy_directory / "appa.toml"),
+    )
+    scheduler = CmaScheduler(
+        repository,
+        provider,
+        pending_input,
+        scheduler_trigger,
+        push_trigger,
+        policy_engine=policy_engine,
+        preview_trigger=(
+            production_preview_trigger(config.cma_preview_queue_url)
+            if config.preview_enabled and config.cma_preview_queue_url
+            else None
+        ),
+    )
     push_repository = PushRepository(repository) if push_trigger is not None else None
     owned = with_dispatcher and push_trigger is not None and push_http is None
     if owned:

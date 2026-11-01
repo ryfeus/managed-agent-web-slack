@@ -33,6 +33,18 @@ resource "aws_subnet" "a2a_private" {
   tags              = { Name = "${local.name}-a2a-private" }
 }
 
+resource "aws_subnet" "web_private" {
+  vpc_id            = aws_vpc.a2a.id
+  cidr_block        = "10.77.2.0/24"
+  availability_zone = data.aws_availability_zones.available.names[1]
+  tags              = { Name = "${local.name}-web-private" }
+}
+
+resource "aws_route_table_association" "web_private" {
+  subnet_id      = aws_subnet.web_private.id
+  route_table_id = aws_route_table.a2a_private.id
+}
+
 resource "aws_route_table" "a2a_public" {
   vpc_id = aws_vpc.a2a.id
   tags   = { Name = "${local.name}-a2a-public" }

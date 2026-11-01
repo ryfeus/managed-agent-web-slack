@@ -1,4 +1,4 @@
-"""Private SQS push worker and scheduled maintenance entrypoint."""
+"""Private SQS push worker."""
 
 from __future__ import annotations
 
@@ -21,8 +21,6 @@ async def _handle(event: dict[str, Any]) -> dict[str, Any]:
     dispatcher = composition.push_dispatcher
     assert dispatcher is not None
     try:
-        if event.get("maintenance") == "a2a-push":
-            return {"scheduled": await dispatcher.maintenance()}
         if "maintenance" in event or not isinstance(event.get("Records"), list):
             raise ValueError("Unknown push worker invocation")
         failures: list[dict[str, str]] = []

@@ -1,0 +1,2 @@
+aws-sam-translator==1.115.0
+cfn-lint==1.58.0

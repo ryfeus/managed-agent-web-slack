@@ -64,8 +64,8 @@ class ControllerAdmin:
         task = self.repository.get_task(task_id)
         if task is None:
             raise ValueError("Unknown task")
-        if not PushRepository(self.repository).reset_permanent_failure(task_id, config_id):
-            raise RuntimeError("Push config is not permanently failed or has an active delivery claim")
+        if not PushRepository(self.repository).reset_delivery(task_id, config_id):
+            raise RuntimeError("Push config is unknown, deleted, or has an active delivery claim")
         self.push_trigger.schedule_context(str(task["context_id"]), "admin-retry-push")
 
     def inspect(self, task_id: str) -> dict[str, str | int]:

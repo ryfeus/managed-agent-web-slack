@@ -38,7 +38,7 @@ test('SQS-E2E-004 retry after accepted A2A send converges on one Task', async ({
     const result = await state(request);
     expect(result.database.agent_tasks).toHaveLength(1);
     expect(result.a2a.create_calls).toBe(1);
-    // KL-002 is resolved for Slack by stable A2A message IDs; provider ambiguity is tracked by KL-003.
+    // Stable A2A message IDs deduplicate Slack; ambiguous provider sends remain held.
 });
 
 test('SQS-E2E-005 poison records reach the local processing DLQ without blocking unrelated input', async ({ request }) => {

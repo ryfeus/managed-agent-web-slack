@@ -32,8 +32,6 @@ alone do not adopt existing resources. Never fabricate a lockfile.
 Without a usable export, reproduce the existing configuration, explicitly run
 `npm run cma:apply` to bootstrap replacements, and retain old resources until
 cutover acceptance. Normal deployment requires valid existing lock state.
-The initial migration here follows the replacement path without changing the
-current prompt, model, permissions, networking, or package configuration.
 
 Run one apply/deployment at a time. Review and commit lock changes, including
 partial failures. Remote edits intentionally block apply; normal scripts never

@@ -61,7 +61,7 @@ def migrate() -> None:
         # migrations use idempotent DDL so a partially applied file is safe to
         # rerun before its version marker is written.
         for statement in _statements(path.read_text()):
-            _execute_migration_statement(config, statement)
+            _execute_migration_statement(config, statement, migration=path.name)
         _execute_admin(
             config,
             "INSERT INTO schema_migrations (version) VALUES (%s)",
@@ -157,7 +157,17 @@ def _statements(source: str) -> list[str]:
     return [statement.strip() for statement in re.split(r";\s*(?:\n|$)", source) if statement.strip()]
 
 
-def _execute_migration_statement(config: AppConfig, statement: str) -> None:
+def _execute_migration_statement(config: AppConfig, statement: str, *, migration: str = "") -> None:
+    # Migration 011 normalizes legacy provenance before its first DROP. DSQL commits
+    # each DDL separately; after that DROP, a partial rerun must not reinterpret new
+    # stateless decisions or reference columns already removed.
+    if migration == "011_stateless_openappa.sql" and "UPDATE cma_input_requests" in statement:
+        with connect(config, "admin") as conn:
+            if not conn.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+                "AND table_name = 'cma_input_requests' AND column_name = 'policy_snapshot_revision'"
+            ).fetchone():
+                return
     index = re.match(
         r"^(CREATE\s+(?:UNIQUE\s+)?INDEX)\s+(?!ASYNC\b)(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)\b",
         statement,

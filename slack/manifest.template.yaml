@@ -20,21 +20,6 @@ features:
   bot_user:
     display_name: Claude Managed Agent
     always_online: false
-  shortcuts:
-    - name: Ask agent about this
-      callback_id: ask_agent
-      description: Ask the managed agent to analyze this message.
-      type: message
-    - name: Summarize this thread
-      callback_id: summarize_thread
-      description: Summarize this thread and its decisions.
-      type: message
-    - name: Investigate this
-      callback_id: investigate
-      description: Investigate this message and recommend next steps.
-      type: message
-  unfurl_domains:
-    - __PUBLIC_APP_HOST__
 oauth_config:
   scopes:
     bot:
@@ -44,9 +29,6 @@ oauth_config:
       - im:history
       - channels:history
       - groups:history
-      - commands
-      - links:read
-      - links:write
       - reactions:write
 settings:
   event_subscriptions:
@@ -56,10 +38,7 @@ settings:
       - message.im
       - message.channels
       - message.groups
-      - app_home_opened
-      - app_context_changed
       - agent_session_stopped
-      - link_shared
   interactivity:
     is_enabled: true
     request_url: __PUBLIC_APP_URL__/slack/interactions

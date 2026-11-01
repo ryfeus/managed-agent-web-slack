@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -26,20 +24,6 @@ from managed_agents_app.protocols.controller_profile import (
     ASYNC_COPILOT_PROFILE_URI,
     HUMAN_INPUT_EXTENSION_URI,
 )
-
-logger = logging.getLogger(__name__)
-_MAINTENANCE_INTERVAL_SECONDS = 60
-
-
-async def _maintain_push(dispatcher: PushDispatcher) -> None:
-    while True:
-        try:
-            await dispatcher.maintenance()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.exception("local_a2a_push_maintenance_failed")
-        await asyncio.sleep(_MAINTENANCE_INTERVAL_SECONDS)
 
 
 def agent_card(base_url: str, push_enabled: bool = False) -> a2a.AgentCard:
@@ -107,7 +91,6 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        maintenance: asyncio.Task[None] | None = None
         if local_scheduler is not None:
             if not isinstance(service.trigger, AsyncLocalSchedulerTrigger):
                 raise RuntimeError("Local scheduler requires an async local trigger")
@@ -115,13 +98,9 @@ def create_app(
         if isinstance(push_trigger, AsyncLocalPushTrigger):
             assert push_dispatcher is not None
             push_trigger.start(push_dispatcher)
-            maintenance = asyncio.create_task(_maintain_push(push_dispatcher))
         try:
             yield
         finally:
-            if maintenance is not None:
-                maintenance.cancel()
-                await asyncio.gather(maintenance, return_exceptions=True)
             if isinstance(push_trigger, AsyncLocalPushTrigger):
                 await push_trigger.stop()
             if isinstance(service.trigger, AsyncLocalSchedulerTrigger):

@@ -5,6 +5,7 @@ import os
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,6 +23,27 @@ from managed_agents_app.cma_controller.trigger import (
     SqsSchedulerTrigger,
 )
 from managed_agents_app.protocols.controller_profile import HUMAN_INPUT_EXTENSION_URI
+
+
+def test_busy_scheduler_wakeup_uses_queue_failure_recovery(config, monkeypatch):
+    # a webhook racing claim release receives ordinary SQS visibility recovery.
+    from managed_agents_app.cma_controller import scheduler_handler
+    from managed_agents_app.cma_controller.scheduler import SchedulerBusy
+
+    configured = config.model_copy(
+        update={
+            "cma_pending_input_bucket": "fixture-input",
+            "cma_scheduler_queue_url": "fixture-queue",
+        }
+    )
+    scheduler = SimpleNamespace(run_once=AsyncMock(side_effect=SchedulerBusy("context-1")))
+    monkeypatch.setattr(scheduler_handler, "load_config", lambda: configured)
+    monkeypatch.setattr(
+        scheduler_handler, "build_controller", lambda *_args, **_kwargs: SimpleNamespace(scheduler=scheduler)
+    )
+    event = {"Records": [{"messageId": "wakeup-1", "body": '{"version":1,"contextId":"context-1"}'}]}
+    assert scheduler_handler.handler(event, None) == {"batchItemFailures": [{"itemIdentifier": "wakeup-1"}]}
+    scheduler.run_once.assert_awaited_once_with("context-1")
 
 
 def _task(**changes: object) -> dict[str, object]:
@@ -58,7 +80,7 @@ def test_task_view_rebuilds_bounded_history_without_thinking_or_later_turns() ->
     assert len(build_task(_task(), events, [], TaskViewOptions(history_length=10)).history) == 2
 
 
-def test_input_required_exposes_all_pending_approvals() -> None:
+def test_machine_approvals_are_not_exposed_as_human_input() -> None:
     events = [
         {"id": "user_1", "type": "user.message", "content": [{"type": "text", "text": "Run"}]},
         {"id": "tool_1", "type": "agent.tool_use", "name": "browser", "input": {"url": "example"}},
@@ -75,9 +97,8 @@ def test_input_required_exposes_all_pending_approvals() -> None:
         TaskViewOptions(enabled_extensions=frozenset({HUMAN_INPUT_EXTENSION_URI})),
     )
     assert task.status.state == a2a.TaskState.TASK_STATE_INPUT_REQUIRED
-    assert list(task.status.message.extensions) == [HUMAN_INPUT_EXTENSION_URI]
-    envelope = task.status.message.metadata[HUMAN_INPUT_EXTENSION_URI]
-    assert len(envelope["requests"]) == 2
+    assert not task.status.message.extensions
+    assert "requests" not in task.status.message.metadata
 
 
 @pytest.mark.parametrize(
@@ -193,3 +214,75 @@ async def test_cancel_does_not_delete_input_if_queued_task_became_active() -> No
 
     pending.delete.assert_not_called()
     trigger.schedule.assert_called_once_with("context_1", "cancel-requested")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "boundary", [a2a.TaskState.TASK_STATE_COMPLETED, a2a.TaskState.TASK_STATE_INPUT_REQUIRED]
+)
+async def test_watch_reads_periodic_history_without_marker_change_or_cma_sse(monkeypatch, boundary):
+    from managed_agents_app.cma_controller import request_handler
+
+    clock = [0.0]
+    reads = []
+    initial = a2a.Task(
+        id="task-1", context_id="context-1", status=a2a.TaskStatus(state=a2a.TaskState.TASK_STATE_WORKING)
+    )
+
+    async def sleep(seconds):
+        clock[0] += seconds
+
+    async def get_task(*_args, **_kwargs):
+        reads.append(clock[0])
+        current = a2a.Task()
+        current.CopyFrom(initial)
+        if clock[0] >= 2:
+            current.history.append(
+                a2a.Message(
+                    message_id="stable", role=a2a.Role.ROLE_AGENT, parts=[a2a.Part(text="Persisted answer")]
+                )
+            )
+        if clock[0] >= 7:
+            current.status.state = boundary
+        return current
+
+    async def marker(*_args):
+        return (7 if clock[0] >= 7 else 0, "state", None, None)
+
+    service = MagicMock()
+    service.get_task = AsyncMock(side_effect=get_task)
+    service.watch_marker = AsyncMock(side_effect=marker)
+    service.provider.stream_events.side_effect = AssertionError("CMA SSE is P1-only")
+    monkeypatch.setattr(request_handler, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(request_handler, "asyncio", SimpleNamespace(sleep=sleep))
+    handler = request_handler.CmaA2ARequestHandler(service, agent_card("http://a2a.test"))
+    observed = [event async for event in handler._watch(initial, TaskViewOptions(), initial)]
+    assert reads == [0, 5, 7]  # Complete message is observed while marker/state still says WORKING.
+    assert [type(event) for event in observed] == [a2a.Task, a2a.Message, a2a.TaskStatusUpdateEvent]
+    assert observed[1].message_id == "stable"
+    assert observed[2].status.state == boundary
+    service.provider.stream_events.assert_not_called()
+    service.cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_watch_deadline_does_not_complete_or_cancel_work(monkeypatch):
+    from managed_agents_app.cma_controller import request_handler
+
+    clock = [0.0]
+
+    async def sleep(seconds):
+        clock[0] += seconds
+
+    current = a2a.Task(id="task-1", status=a2a.TaskStatus(state=a2a.TaskState.TASK_STATE_WORKING))
+    service = MagicMock()
+    service.get_task = AsyncMock(return_value=current)
+    service.watch_marker = AsyncMock(return_value=(0, "WORKING", None, None))
+    monkeypatch.setattr(request_handler, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(request_handler, "asyncio", SimpleNamespace(sleep=sleep))
+    monkeypatch.setattr(request_handler, "_WATCH_SECONDS", 2)
+    handler = request_handler.CmaA2ARequestHandler(service, agent_card("http://a2a.test"))
+    assert [event async for event in handler._watch(current, TaskViewOptions(), current)] == [current]
+    assert clock[0] == 2
+    service.cancel.assert_not_called()
+    service.provider.stream_events.assert_not_called()

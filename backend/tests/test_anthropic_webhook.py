@@ -58,11 +58,18 @@ def test_invalid_completion_webhook_is_rejected(runtime, monkeypatch, config) ->
     secret = "whsec_" + base64.b64encode(b"test-webhook-secret").decode()
     configured = config.model_copy(update={"anthropic_webhook_signing_key": secret})
     monkeypatch.setattr(anthropic_webhook, "load_config", lambda: configured)
-    body = json.dumps({"type": "event"}, separators=(",", ":"))
+    body = _completion_body("sesn_controller")
     event = signed_event(body, secret, "msg_test", datetime.now(UTC))
     event["headers"]["webhook-signature"] = "v1,invalid"
     result = anthropic_webhook.handler(event, None)
     assert result["statusCode"] == 401
+    repository = MagicMock()
+    repository.context_for_session.return_value = {"context_id": "context_1"}
+    trigger = MagicMock()
+    result = anthropic_webhook.handle_request(configured, event, repository, trigger)
+    assert result["statusCode"] == 401
+    repository.context_for_session.assert_not_called()
+    trigger.schedule.assert_not_called()
 
 
 def test_controller_owned_webhook_wakes_scheduler_and_ignores_unknown(runtime, config) -> None:

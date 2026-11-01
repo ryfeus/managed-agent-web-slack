@@ -2,13 +2,8 @@
 okf_version: "0.2"
 ---
 
-# Managed Agents Application Knowledge
+# Application operational knowledge
 
-Reusable operational knowledge and runbooks for the web and Slack Managed Agents application.
+Current application workflows live in [docs](../docs/operations.md). This bundle retains specialized operational details without duplicating contributor guidance.
 
-## Navigate
-
-- [Areas](areas/index.md) - Durable platform and integration knowledge.
-- [Projects](projects/index.md) - Application-specific operating procedures.
-- [`known-limitations.json`](known-limitations.json) - Machine-checked correctness gaps linked to executable tests.
-- [`persistence-schema-contract.json`](persistence-schema-contract.json) - Machine-checked inventory of metadata tables and columns owned by migrations.
+- [Areas](areas/index.md) — DSQL authentication and OpenAPPA migration/recovery notes.

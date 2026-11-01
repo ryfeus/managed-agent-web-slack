@@ -20,7 +20,7 @@ class A2ATaskUpdated(BoundaryModel):
     thread_id: str = Field(alias="threadId", min_length=1)
     context_id: str = Field(alias="contextId", min_length=1)
     event_kind: Literal["task", "message", "status_update", "artifact_update"] = Field(alias="eventKind")
-    task_state: str = Field(alias="taskState", min_length=1)
+    task_state: str | None = Field(default=None, alias="taskState", min_length=1)
 
 
 class SlackMessageReceived(BoundaryModel):
@@ -35,7 +35,6 @@ class SlackMessageReceived(BoundaryModel):
     command: Literal["message", "link"] = "message"
     link_thread_id: str | None = Field(default=None, alias="linkThreadId")
     channel_type: str | None = Field(default=None, alias="channelType")
-    active_context: dict[str, Any] | None = Field(default=None, alias="activeContext")
     event_type: str = Field(default="app_mention", alias="eventType")
 
 
@@ -93,59 +92,10 @@ class SlackToolConfirmationRequested(BoundaryModel):
     response_message_ts: str | None = Field(default=None, alias="responseMessageTs")
 
 
-class SlackFeedbackReceived(BoundaryModel):
-    version: Literal[1] = 1
-    interaction_id: str = Field(alias="interactionId")
-    team_id: str = Field(alias="teamId")
-    channel_id: str = Field(alias="channelId")
-    thread_ts: str = Field(alias="threadTs")
-    user_id: str = Field(alias="userId")
-    rating: Literal["positive", "negative"]
-    task_id: str = Field(alias="taskId")
-    message_id: str | None = Field(default=None, alias="messageId")
-    external_message_id: str | None = Field(default=None, alias="externalMessageId")
-    reason: str | None = None
-
-
-class SlackShortcutReceived(BoundaryModel):
-    version: Literal[1] = 1
-    interaction_id: str = Field(alias="interactionId")
-    team_id: str = Field(alias="teamId")
-    channel_id: str = Field(alias="channelId")
-    message_ts: str = Field(alias="messageTs")
-    thread_ts: str = Field(alias="threadTs")
-    user_id: str = Field(alias="userId")
-    callback_id: Literal["ask_agent", "summarize_thread", "investigate"] = Field(alias="callbackId")
-
-
-class SlackThreadLinkRequested(BoundaryModel):
-    version: Literal[1] = 1
-    interaction_id: str = Field(alias="interactionId")
-    team_id: str = Field(alias="teamId")
-    channel_id: str = Field(alias="channelId")
-    thread_ts: str = Field(alias="threadTs")
-    user_id: str = Field(alias="userId")
-    thread_id: str = Field(alias="threadId")
-
-
-class SlackThreadLinkShared(BoundaryModel):
-    version: Literal[1] = 1
-    event_id: str = Field(alias="eventId")
-    team_id: str = Field(alias="teamId")
-    channel_id: str = Field(alias="channelId")
-    message_ts: str = Field(alias="messageTs")
-    user_id: str = Field(alias="userId")
-    urls: list[str]
-
-
 SLACK_MESSAGE_RECEIVED = "SlackMessageReceived"
 SLACK_CONTROL_REPLY_REQUESTED = "SlackControlReplyRequested"
 SLACK_TASK_PROJECTION_REQUESTED = "SlackTaskProjectionRequested"
 SLACK_WORK_STARTED = "SlackWorkStarted"
 SLACK_THREAD_STOP_REQUESTED = "SlackThreadStopRequested"
 SLACK_TOOL_CONFIRMATION_REQUESTED = "SlackToolConfirmationRequested"
-SLACK_FEEDBACK_RECEIVED = "SlackFeedbackReceived"
-SLACK_SHORTCUT_RECEIVED = "SlackShortcutReceived"
-SLACK_THREAD_LINK_REQUESTED = "SlackThreadLinkRequested"
-SLACK_THREAD_LINK_SHARED = "SlackThreadLinkShared"
 A2A_TASK_UPDATED = "A2ATaskUpdated"

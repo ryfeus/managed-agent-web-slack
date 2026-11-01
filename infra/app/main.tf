@@ -56,28 +56,17 @@ locals {
     a2a-event-sink    = []
   }
   common_environment = {
-    APP_ENV                        = "production"
-    APP_NAME                       = var.app_name
-    EVENT_BUS_NAME                 = aws_cloudwatch_event_bus.app.name
-    DSQL_ENDPOINT                  = local.dsql_endpoint
-    DSQL_DATABASE                  = "postgres"
-    DSQL_ROLE                      = "app_runtime"
-    DEV_PRINCIPAL_ID               = "00000000-0000-4000-8000-000000000001"
-    SLACK_TEAM_ID                  = var.slack_team_allowlist
-    SLACK_USER_ID                  = var.slack_user_allowlist
-    PUBLIC_APP_URL                 = var.public_app_url
-    SLACK_AGENT_VIEW_ENABLED       = tostring(var.slack_agent_view_enabled)
-    SLACK_BOUND_THREAD_REPLIES     = tostring(var.slack_bound_thread_replies_enabled)
-    SLACK_STREAMING_ENABLED        = tostring(var.slack_streaming_enabled)
-    SLACK_TOOL_APPROVALS_ENABLED   = tostring(var.slack_approvals_enabled)
-    SLACK_FEEDBACK_ENABLED         = tostring(var.slack_feedback_enabled)
-    SLACK_SHORTCUTS_ENABLED        = tostring(var.slack_shortcuts_enabled)
-    SLACK_ACTIVE_CONTEXT_ENABLED   = tostring(var.slack_active_context_enabled)
-    SLACK_UNFURLS_ENABLED          = tostring(var.slack_unfurls_enabled)
-    SLACK_RECEIPT_REACTION_ENABLED = tostring(var.slack_receipt_reaction_enabled)
-    SLACK_RECEIPT_REACTION         = var.slack_receipt_reaction
-    SLACK_SOURCE_LINKS_ENABLED     = tostring(var.slack_source_links_enabled)
-    SLACK_TASK_CARDS_ENABLED       = tostring(var.slack_task_cards_enabled)
+    APP_ENV                = "production"
+    APP_NAME               = var.app_name
+    EVENT_BUS_NAME         = aws_cloudwatch_event_bus.app.name
+    DSQL_ENDPOINT          = local.dsql_endpoint
+    DSQL_DATABASE          = "postgres"
+    DSQL_ROLE              = "app_runtime"
+    DEV_PRINCIPAL_ID       = "00000000-0000-4000-8000-000000000001"
+    SLACK_TEAM_ID          = var.slack_team_allowlist
+    SLACK_USER_ID          = var.slack_user_allowlist
+    PUBLIC_APP_URL         = var.public_app_url
+    SLACK_RECEIPT_REACTION = var.slack_receipt_reaction
   }
   controller_environment = merge(local.common_environment, {
     CLAUDE_AGENT_ID          = var.claude_agent_id
@@ -127,6 +116,9 @@ locals {
       A2A_EVENT_SINK_URL         = "${local.private_a2a_url}/internal/a2a/events"
     })
     cma-scheduler = merge(local.controller_environment, {
+      PREVIEW_ENABLED              = tostring(var.preview_enabled)
+      CMA_PREVIEW_QUEUE_URL        = aws_sqs_queue.cma_preview.id
+      OPENAPPA_TIMEOUT_SECONDS     = tostring(var.openappa_timeout_seconds)
       ANTHROPIC_API_KEY_SECRET_ARN = aws_secretsmanager_secret.anthropic_api_key.arn
     })
     cma-push = merge(local.controller_environment, {
@@ -221,7 +213,7 @@ resource "aws_iam_role_policy" "lambda_access" {
         Effect   = "Allow", Action = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes", "sqs:SendMessage"]
         Resource = aws_sqs_queue.cma_scheduler.arn
         }, {
-        Effect   = "Allow", Action = ["s3:GetObject", "s3:DeleteObject"]
+        Effect   = "Allow", Action = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
         Resource = "${aws_s3_bucket.cma_pending_input.arn}/pending/*"
         }, {
         Effect   = "Allow", Action = ["s3:ListBucket"]
@@ -267,17 +259,19 @@ resource "aws_cloudwatch_log_group" "lambda" {
 }
 
 resource "aws_lambda_function" "app" {
-  for_each         = local.lambda_names
-  function_name    = "${local.name}-${each.key}"
-  role             = aws_iam_role.lambda[each.key].arn
-  runtime          = local.lambda_runtimes[each.key]
-  handler          = local.lambda_handlers[each.key]
-  architectures    = ["x86_64"]
-  layers           = contains(["agui-bridge", "cma-controller", "a2a-event-sink"], each.key) ? ["arn:aws:lambda:${var.aws_region}:753240598075:layer:LambdaAdapterLayerX86:28"] : []
-  filename         = "${path.module}/../../dist/lambdas/${local.lambda_artifacts[each.key]}"
-  source_code_hash = filebase64sha256("${path.module}/../../dist/lambdas/${local.lambda_artifacts[each.key]}")
-  timeout          = contains(["agui-bridge", "slack-projector", "cma-controller"], each.key) ? 900 : each.key == "cma-push" ? 120 : 60
-  memory_size      = contains(["agui-bridge", "cma-controller"], each.key) ? 1024 : 512
+  for_each          = local.lambda_names
+  function_name     = "${local.name}-${each.key}"
+  role              = aws_iam_role.lambda[each.key].arn
+  runtime           = local.lambda_runtimes[each.key]
+  handler           = local.lambda_handlers[each.key]
+  architectures     = ["x86_64"]
+  layers            = contains(["agui-bridge", "cma-controller", "a2a-event-sink"], each.key) ? ["arn:aws:lambda:${var.aws_region}:753240598075:layer:LambdaAdapterLayerX86:28"] : []
+  s3_bucket         = aws_s3_object.lambda_artifact[local.lambda_artifacts[each.key]].bucket
+  s3_key            = aws_s3_object.lambda_artifact[local.lambda_artifacts[each.key]].key
+  s3_object_version = aws_s3_object.lambda_artifact[local.lambda_artifacts[each.key]].version_id
+  source_code_hash  = filebase64sha256("${path.module}/../../dist/lambdas/${local.lambda_artifacts[each.key]}")
+  timeout           = contains(["agui-bridge", "slack-projector", "cma-controller"], each.key) ? 900 : each.key == "cma-push" ? 120 : 60
+  memory_size       = contains(["agui-bridge", "cma-controller"], each.key) ? 1024 : 512
 
   dynamic "vpc_config" {
     for_each = contains(local.vpc_lambdas, each.key) ? [1] : []

@@ -1,0 +1,80 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Terraform-owned private-egress AG-UI Web Function, connector, and OAC
+Parameters:
+  Name: {Type: String}
+  ArtifactBucket: {Type: String}
+  ArtifactKey: {Type: String}
+  ArtifactVersion: {Type: String}
+  ExecutionRole: {Type: String}
+  LogGroup: {Type: String}
+  SubnetA: {Type: AWS::EC2::Subnet::Id}
+  SubnetB: {Type: AWS::EC2::Subnet::Id}
+  SecurityGroup: {Type: AWS::EC2::SecurityGroup::Id}
+  DsqlEndpoint: {Type: String}
+  A2aEndpoint: {Type: String}
+  PublicOrigin: {Type: String}
+  AccessTokenSecret: {Type: String}
+  CookieSecret: {Type: String}
+  PreviewEnabled: {Type: String, AllowedValues: ['true', 'false']}
+  AppSyncHttpUrl: {Type: String}
+  AppSyncWebsocketUrl: {Type: String}
+Resources:
+  Connector:
+    Type: AWS::Serverless::NetworkConnector
+    Properties:
+      Name: !Sub '${Name}-egress'
+      ComputeTypes: [WebFunction]
+      VpcConfig:
+        SubnetIds: [!Ref SubnetA, !Ref SubnetB]
+        SecurityGroupIds: [!Ref SecurityGroup]
+        NetworkProtocol: IPv4
+  Web:
+    Type: AWS::Serverless::WebFunction
+    UpdateReplacePolicy: Retain
+    Properties:
+      FunctionName: !Ref Name
+      Runtime: nodejs24.x
+      # Web Functions run Arm64; there is no Architecture property.
+      CodeUri:
+        Bucket: !Ref ArtifactBucket
+        Key: !Ref ArtifactKey
+        Version: !Ref ArtifactVersion
+      AuthType: IamAuth
+      EndpointType: HomeRegion
+      EndpointName: prod
+      AutoDeploymentMode: LatestRevision
+      ExecutionRoleArn: !Ref ExecutionRole
+      EgressNetworkConnectorArn: !GetAtt Connector.LatestVersionArn
+      Timeout: 900
+      MaxConcurrencyPerEnvironment: 16
+      LoggingConfig:
+        LogGroup: !Ref LogGroup
+      EnvironmentVariables:
+        APP_ENV: production
+        DSQL_ENDPOINT: !Ref DsqlEndpoint
+        DSQL_DATABASE: postgres
+        DSQL_ROLE: app_runtime
+        CMA_A2A_ENDPOINT: !Ref A2aEndpoint
+        A2A_EVENT_SINK_URL: !Sub '${A2aEndpoint}/internal/a2a/events'
+        PUBLIC_APP_URL: !Ref PublicOrigin
+        WEB_ACCESS_TOKEN_SECRET_ARN: !Ref AccessTokenSecret
+        WEB_COOKIE_SECRET_SECRET_ARN: !Ref CookieSecret
+        PREVIEW_ENABLED: !Ref PreviewEnabled
+        APPSYNC_HTTP_URL: !Ref AppSyncHttpUrl
+        APPSYNC_WEBSOCKET_URL: !Ref AppSyncWebsocketUrl
+  Oac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${Name}-oac'
+        OriginAccessControlOriginType: lambda
+        SigningProtocol: sigv4
+        SigningBehavior: always-amz-auth
+Outputs:
+  FunctionArn: {Value: !GetAtt Web.FunctionArn}
+  EndpointDomain: {Value: !GetAtt WebEndpoint.DomainName}
+  EndpointArn: {Value: !GetAtt WebEndpoint.EndpointArn}
+  RevisionId: {Value: !GetAtt WebRevision.RevisionId}
+  ConnectorVersionArn: {Value: !GetAtt Connector.LatestVersionArn}
+  OacId: {Value: !GetAtt Oac.Id}

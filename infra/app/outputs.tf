@@ -32,7 +32,7 @@ output "cma_push_queue_url" {
 }
 
 output "dsql_runtime_role_arns" {
-  value = [for name in local.dsql_lambdas : aws_iam_role.lambda[name].arn]
+  value = concat([for name in local.dsql_lambdas : aws_iam_role.lambda[name].arn], [aws_iam_role.web_function.arn])
 }
 
 output "web_bucket_name" {

@@ -46,3 +46,24 @@ def test_repository_rejects_invalid_identity_inputs_before_database_access(confi
         controller.create_initializing_context("", "message")
     with pytest.raises(ValueError, match="sequence"):
         controller.create_task("task", "context", "message", 0, "TASK_STATE_SUBMITTED", "queued")
+
+
+def test_application_surfaces_do_not_import_the_private_provider():
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "src/managed_agents_app"
+    for directory in ("agui_bridge", "agent_control_plane", "slack", "handlers"):
+        for path in (root / directory).glob("*.py"):
+            modules = []
+            for node in ast.walk(ast.parse(path.read_text())):
+                if isinstance(node, ast.ImportFrom):
+                    modules.append(node.module or "")
+                elif isinstance(node, ast.Import):
+                    modules.extend(item.name for item in node.names)
+            assert not any(
+                name.startswith(
+                    ("anthropic", "managed_agents_app.managed_agent", "managed_agents_app.cma_controller")
+                )
+                for name in modules
+            ), path

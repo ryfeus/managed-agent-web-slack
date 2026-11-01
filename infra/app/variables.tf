@@ -59,62 +59,17 @@ variable "public_app_url" {
   default     = ""
 }
 
-variable "slack_agent_view_enabled" {
-  type    = bool
-  default = false
-}
-
-variable "slack_bound_thread_replies_enabled" {
-  type    = bool
-  default = false
-}
-
-variable "slack_streaming_enabled" {
-  type    = bool
-  default = false
-}
-
-variable "slack_approvals_enabled" {
-  type    = bool
-  default = false
-}
-
-variable "slack_feedback_enabled" {
-  type    = bool
-  default = false
-}
-
-variable "slack_shortcuts_enabled" {
-  type    = bool
-  default = false
-}
-
-variable "slack_active_context_enabled" {
-  type    = bool
-  default = false
-}
-
-variable "slack_unfurls_enabled" {
-  type    = bool
-  default = false
-}
-
-variable "slack_receipt_reaction_enabled" {
-  type    = bool
-  default = false
-}
-
 variable "slack_receipt_reaction" {
   type    = string
   default = "eyes"
 }
 
-variable "slack_source_links_enabled" {
-  type    = bool
-  default = false
-}
-
-variable "slack_task_cards_enabled" {
-  type    = bool
-  default = false
+variable "openappa_timeout_seconds" {
+  description = "Maximum native policy evaluation budget within the scheduler lease."
+  type        = number
+  default     = 10
+  validation {
+    condition     = var.openappa_timeout_seconds > 0 && var.openappa_timeout_seconds <= 30
+    error_message = "OpenAPPA timeout must be greater than zero and at most 30 seconds."
+  }
 }
