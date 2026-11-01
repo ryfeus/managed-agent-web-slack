@@ -85,8 +85,6 @@ def test_runtime_modes(config):
         ("managed_agents_app.handlers.agent_input_sqs", "handler", ({}, None)),
         ("managed_agents_app.cma_controller.webhook", "handler", ({}, None)),
         ("managed_agents_app.handlers.slack_projector", "handler", ({}, None)),
-        ("managed_agents_app.handlers.web_api", "handler", ({}, None)),
-        ("managed_agents_app.agui_bridge.app", "production_app", ()),
     ],
 )
 def test_production_entrypoints_reject_e2e_runtime(
@@ -148,7 +146,7 @@ def test_queue_runs_concurrent_handlers_when_requested():
 
 def test_slack_records_wrapper_payloads_and_enforces_stream_lifecycle():
     slack = RecordingSlack()
-    ts = slack.start_stream("C", "1", "T", "U", chunks=[{"type": "task_update"}])
+    ts = slack.start_stream("C", "1", "T", "U", chunks=[{"type": "task_update", "id": "request:test"}])
     with pytest.raises(ValueError, match="mix"):
         slack.append_stream("C", ts, "wrong mode")
     slack.fail_next("chat.appendStream", after=True)
@@ -159,4 +157,4 @@ def test_slack_records_wrapper_payloads_and_enforces_stream_lifecycle():
     with pytest.raises(RuntimeError, match="message_not_in_streaming_state"):
         slack.append_stream_chunks("C", ts, [{"type": "markdown_text", "text": "late"}])
     slack.reset()
-    assert slack.start_stream("C", "1", "T", "U", "new") == "1000.000001"
+    assert slack.start_stream("C", "1", "T", "U", "new").endswith(".000001")

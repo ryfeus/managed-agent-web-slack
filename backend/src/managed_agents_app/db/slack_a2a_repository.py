@@ -201,6 +201,18 @@ class SlackA2ARepository:
                 (binding_id, task_id),
             ).fetchall()
 
+    def has_human_input_receipt(self, binding_id: str, task_id: str) -> bool:
+        # Closed controls retain their receipt even after the Task resumes WORKING.
+        with connect(self.config, self.role) as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM slack_projection_items WHERE binding_id = %s AND task_id = %s "
+                    "AND item_kind = 'human_input' AND status = 'posted' LIMIT 1",
+                    (binding_id, task_id),
+                ).fetchone()
+                is not None
+            )
+
     def close_human_input(self, binding_id: str, task_id: str, item_id: str) -> None:
         with connect(self.config, self.role) as conn:
             conn.execute(

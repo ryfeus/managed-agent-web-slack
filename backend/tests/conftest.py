@@ -35,7 +35,6 @@ def runtime(monkeypatch, config):
         agent_input,
         slack_ingress,
         slack_projector,
-        web_api,
     )
     from managed_agents_app.runtime import Runtime
 
@@ -45,6 +44,6 @@ def runtime(monkeypatch, config):
         result.config = config
         return result
 
-    for module in [agent_input, slack_projector, slack_ingress, web_api]:
+    for module in [agent_input, slack_projector, slack_ingress]:
         monkeypatch.setattr(module, "get_runtime", factory)
     return result

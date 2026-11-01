@@ -33,13 +33,14 @@ from managed_agents_app.slack.a2a_projection import (
     task_state,
 )
 from managed_agents_app.slack.blocks import (
-    completed_task_chunk,
     markdown_text_chunk,
     response_text_blocks,
+    settled_task_chunk,
     source_link_blocks,
     tool_approval_blocks,
     working_task_chunk,
 )
+from managed_agents_app.slack.preview import SlackPreviewHint
 
 
 def handle_domain_event(runtime: Runtime, event: dict[str, Any]) -> None:
@@ -152,6 +153,7 @@ async def _reconcile_projection(
     assert claim.token and claim.row
     projection = claim.row
     state = projection["last_task_state"]
+    new_stream = None
     try:
         # Read inside the claim: an older delivery cannot overwrite a newer projection.
         async with application_control_plane(runtime) as service:
@@ -165,7 +167,7 @@ async def _reconcile_projection(
         can_start = projection["last_task_state"] in {None, "SUBMITTED", "WORKING"} and bool(
             projection["initiator_user_id"]
         )
-        if can_start and not stream_ts:
+        if can_start and not stream_ts and not repo.has_human_input_receipt(binding_id, task_id):
             try:
                 stream_ts = slack.start_stream(
                     channel_id,
@@ -176,6 +178,7 @@ async def _reconcile_projection(
                     task_display_mode="timeline",
                 )
                 repo.update_stream_message(binding_id, task_id, claim.token, stream_ts)
+                new_stream = stream_ts
             except Exception as error:
                 response = getattr(error, "response", None)
                 code = response.get("error") if response is not None else None
@@ -204,6 +207,18 @@ async def _reconcile_projection(
         repo.finish_stream(binding_id, task_id, claim.token, fallback=True, state=state, error=str(error))
         # EventBridge retries projection only; it never resubmits the CMA turn.
         raise
+    # P1 network/configuration failures must never re-enter the P0 failure path.
+    if (
+        new_stream
+        and state in {"SUBMITTED", "WORKING"}
+        and runtime.config.preview_enabled
+        and runtime.config.slack_preview_enabled
+    ):
+        try:
+            if trigger := runtime.slack_preview_trigger:
+                trigger.start(SlackPreviewHint(binding_id, task_id, new_stream))
+        except Exception:
+            log("warning", "slack_preview_hint_failed", task_id=task_id, binding_id=binding_id)
 
 
 def _project_task(
@@ -269,7 +284,13 @@ def _project_task(
         slack.stop_stream(
             channel_id,
             stream_ts,
-            chunks=[completed_task_chunk(request_id or task_id)] if status != "suspended" else None,
+            chunks=[
+                settled_task_chunk(
+                    request_id or task_id,
+                    task_state(task),
+                    approval=any(isinstance(r, ToolApprovalRequest) for r in requests_from_task(task)),
+                )
+            ],
             status=status,
         )
     slack.set_agent_status(channel_id, thread_ts, status)

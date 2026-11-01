@@ -12,6 +12,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from managed_agents_app.cma_controller.preview import PreviewHint
+from managed_agents_app.slack.preview import SlackPreviewHint
 
 
 class LocalPreviewTrigger:
@@ -20,13 +21,39 @@ class LocalPreviewTrigger:
         self.streams = 0
         self.connected = 0
 
-    def start(self, hint: PreviewHint) -> None:
+    def start(self, hint: PreviewHint | SlackPreviewHint) -> None:
         self.hints.append(hint.wire())
 
 
-def preview_router(harness: Any) -> APIRouter:
+def preview_router(runtime: Any) -> APIRouter:
     router = APIRouter()
+    harness = runtime.local_a2a
     trigger = harness.preview_trigger
+
+    @router.get("/_test/slack-preview-hints")
+    def slack_hints() -> list[dict[str, Any]]:
+        result = list(harness.slack_preview_trigger.hints)
+        harness.slack_preview_trigger.hints.clear()
+        return result
+
+    @router.post("/_test/slack-preview-control")
+    async def slack_control(request: Request) -> dict[str, bool]:
+        body = await request.json()
+        runtime.slack_preview_trigger = harness.slack_preview_trigger if body["enabled"] else None
+        return {"ok": True}
+
+    @router.post("/_test/slack-preview-append")
+    async def slack_append(request: Request) -> dict[str, Any]:
+        try:
+            return dict(runtime.slack.call("chat.appendStream", await request.json()))
+        except Exception as error:
+            code = str(error)
+            return {
+                "ok": False,
+                "error": code
+                if code in {"rate_limited", "message_not_in_streaming_state"}
+                else "unavailable",
+            }
 
     @router.get("/_test/preview-hints")
     def hints() -> list[dict[str, Any]]:

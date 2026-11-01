@@ -26,7 +26,11 @@
     "aws_lambda_permission.api_gateway[\"web-stream\"]"
   ] | index($address) == null)
 | select(
-    (.type | startswith("aws_dsql_"))
+    (.type | startswith("aws_cloudformation_"))
+    or (.type | startswith("aws_appsync_"))
+    or (.type | startswith("aws_subnet"))
+    or (.type | startswith("aws_nat_gateway"))
+    or (.type | startswith("aws_dsql_"))
     or (.type | startswith("aws_s3_"))
     or (.type | startswith("aws_cloudfront_"))
     or (.type | startswith("aws_api_gateway_"))

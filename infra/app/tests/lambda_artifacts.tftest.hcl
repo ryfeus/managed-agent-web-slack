@@ -1,5 +1,8 @@
 # No AWS credentials or network calls: exercise the real graph with provider mocks.
 mock_provider "aws" {
+  mock_resource "aws_subnet" {
+    override_during = plan
+  }
   mock_resource "aws_route_table" {
     override_during = plan
     defaults        = { id = "rtb-fixture" }
@@ -69,9 +72,9 @@ run "shared_versioned_artifacts" {
   assert {
     condition = (
       length(aws_s3_object.lambda_artifact) == 6 &&
-      length([for function in aws_lambda_function.app : function.s3_key if function.s3_key == "lambda/python-buffered.zip"]) == 7
+      length([for function in aws_lambda_function.app : function.s3_key if function.s3_key == "lambda/python-buffered.zip"]) == 6
     )
-    error_message = "The seven buffered functions share a ZIP; two independent TypeScript artifacts are added."
+    error_message = "The six Python buffered functions share a ZIP; three independent TypeScript artifacts are added."
   }
 
   assert {
@@ -104,6 +107,65 @@ run "shared_versioned_artifacts" {
       jsondecode(aws_s3_bucket_policy.lambda_artifacts.policy).Statement[0].Condition.Bool["aws:SecureTransport"] == "false"
     )
     error_message = "Deployment artifacts must be private, encrypted, versioned and require TLS."
+  }
+}
+
+run "slack_preview_isolation" {
+  command = plan
+  assert {
+    condition = (
+      !var.slack_preview_enabled && !aws_lambda_event_source_mapping.slack_preview.enabled &&
+      aws_lambda_event_source_mapping.slack_preview.batch_size == 1 &&
+      aws_lambda_event_source_mapping.slack_preview.scaling_config[0].maximum_concurrency == 4 &&
+      aws_sqs_queue.slack_preview.fifo_queue && aws_sqs_queue.slack_preview.sqs_managed_sse_enabled &&
+      aws_sqs_queue.slack_preview.message_retention_seconds == 60 &&
+      aws_sqs_queue.slack_preview.visibility_timeout_seconds >= 6 * aws_lambda_function.slack_preview.timeout &&
+      aws_lambda_function.slack_preview.runtime == "nodejs24.x" &&
+      tolist(aws_lambda_function.slack_preview.architectures) == tolist(["arm64"]) &&
+      aws_lambda_function.slack_preview.reserved_concurrent_executions == 4 &&
+      aws_lambda_function.slack_preview.s3_key == "lambda/slack-preview.zip" &&
+      aws_lambda_function.slack_preview.s3_object_version == "fixture-object-version" &&
+      aws_lambda_function.slack_preview.vpc_config[0].subnet_ids == toset([aws_subnet.a2a_private.id, aws_subnet.web_private.id]) &&
+      aws_dsql_cluster.app.deletion_protection_enabled
+    )
+    error_message = "Slack preview must default off, use bounded FIFO concurrency, existing private network/versioned artifacts, and preserve DSQL."
+  }
+  assert {
+    condition = (
+      toset(flatten([for s in jsondecode(aws_iam_role_policy.slack_preview.policy).Statement : s.Action])) == toset([
+        "appsync:EventConnect", "appsync:EventSubscribe", "dsql:DbConnect", "secretsmanager:GetSecretValue",
+        "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"
+      ]) &&
+      alltrue([for s in jsondecode(aws_iam_role_policy.slack_preview.policy).Statement :
+        !contains(s.Action, "secretsmanager:GetSecretValue") || s.Resource == aws_secretsmanager_secret.slack_bot_token.arn
+      ]) &&
+      !contains(keys(aws_lambda_function.slack_preview.environment[0].variables), "ANTHROPIC_API_KEY_SECRET_ARN") &&
+      !contains(keys(aws_lambda_function.slack_preview.environment[0].variables), "CMA_A2A_ENDPOINT") &&
+      jsondecode(aws_iam_role_policy.slack_preview_start.policy).Statement[0].Action == ["sqs:SendMessage"] &&
+      jsondecode(aws_iam_role_policy.slack_preview_start.policy).Statement[0].Resource == aws_sqs_queue.slack_preview.arn
+    )
+    error_message = "Slack subscriber may read only the bot secret and subscribe, never publish, read CMA credentials or mutate tasks."
+  }
+}
+
+run "slack_preview_requires_producer" {
+  command = plan
+  variables { slack_preview_enabled = true }
+  assert {
+    condition     = !aws_lambda_event_source_mapping.slack_preview.enabled
+    error_message = "Enabling only the Slack consumer cannot start subscriptions."
+  }
+}
+
+run "slack_preview_explicit_enable" {
+  command = plan
+  variables {
+    slack_preview_enabled = true
+    preview_enabled       = true
+  }
+  assert {
+    condition     = aws_lambda_event_source_mapping.slack_preview.enabled
+    error_message = "Both explicit P1 flags enable the separate Slack mapping."
   }
 }
 

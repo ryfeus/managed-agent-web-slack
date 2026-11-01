@@ -114,9 +114,9 @@ def test_signed_turn_and_duplicate_use_one_task_and_one_slack_card(local):
     assert len(rows(local, "cma_contexts")) == 1
     assert local.local_a2a.provider.create_calls == 1
     assert len(local.slack.streams) == 1
-    assert local.slack.streams["1000.000001"]["text"] == "Done"
+    assert next(iter(local.slack.streams.values()))["text"] == "Done"
     assert len(local.slack.reactions) == 1
-    assert "Original message" in json.dumps(local.slack.streams["1000.000001"]["chunks"])
+    assert "Original message" in json.dumps(next(iter(local.slack.streams.values()))["chunks"])
 
 
 def test_bound_reply_reuses_thread_and_rejects_another_owner(local):

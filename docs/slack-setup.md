@@ -34,6 +34,10 @@ npm run db:map-slack -- --team-id T01234567 --user-id U01234567
 
 Run with concrete AWS credentials and `AWS_REGION=us-west-2`. Optional `SLACK_TEAM_ID`/`SLACK_USER_ID` narrow development traffic but never authorize it; normally leave them unset.
 
+## Optional draft titles
+
+Phase 6 adds optional rolling `Draft: …` task-card titles with `SLACK_PREVIEW_ENABLED=true` and `PREVIEW_ENABLED=true`. Both default false. No new OAuth scope is needed: title updates use the existing `chat:write` grant. This is a short provisional excerpt; canonical Markdown is authoritative and P0 replaces the title at completion, Stop, failure or human input. No preview is started without a P0-created stream, and review does not reopen a closed card. See [rollout and remaining acceptance](phase-6-rollout.md).
+
 ## API-only sandbox testing
 
 Configure local `SLACK_USER_TOKEN`, `SLACK_BOT_TOKEN`, `E2E_LIVE_SLACK_CHANNEL_ID`, Web credentials and AWS/DSQL access. User token scopes need `chat:write` and the channel's history scope; both users/bot must access the channel. `RUN_LIVE_E2E=1 npm run test:live -- all` validates account, configuration, scopes, identity ownership and channel access before genuine delivery. It does not deploy, provision, remap or log in. The user token stays local and is never synced to Secrets Manager or Lambda.

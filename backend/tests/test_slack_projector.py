@@ -9,7 +9,7 @@ from a2a.types import a2a_pb2 as a2a
 
 from managed_agents_app.db.slack_a2a_repository import Claim
 from managed_agents_app.handlers import slack_projector
-from managed_agents_app.slack.blocks import completed_task_chunk, markdown_text_chunk, working_task_chunk
+from managed_agents_app.slack.blocks import markdown_text_chunk, settled_task_chunk, working_task_chunk
 
 
 def task(state: int = a2a.TaskState.TASK_STATE_COMPLETED) -> a2a.Task:
@@ -53,6 +53,7 @@ def make_runtime(config, monkeypatch, current=None):
     repo.finish_stream.side_effect = finish_stream
     repo.update_stream_message.side_effect = lambda _b, _t, _c, ts: projection.update(slack_message_ts=ts)
     repo.claim_item.return_value = Claim("acquired", "item-claim")
+    repo.has_human_input_receipt.return_value = False
     slack.start_stream.return_value = "2.1"
     service = MagicMock()
 
@@ -67,7 +68,9 @@ def make_runtime(config, monkeypatch, current=None):
         yield service
 
     monkeypatch.setattr(slack_projector, "application_control_plane", control)
-    return SimpleNamespace(config=config, slack_a2a=repo, threads=threads, slack=slack), service
+    return SimpleNamespace(
+        config=config, slack_a2a=repo, threads=threads, slack=slack, slack_preview_trigger=MagicMock()
+    ), service
 
 
 def projection_event():
@@ -126,7 +129,7 @@ def test_initial_card_returns_working_then_push_finishes_without_subscription(co
     slack_projector.handle_domain_event(runtime, update_event())
     runtime.slack.start_stream.assert_called_once()
     runtime.slack.append_stream_chunks.assert_called_once_with("C1", "2.1", [markdown_text_chunk("answer")])
-    assert runtime.slack.stop_stream.call_args.kwargs["chunks"] == [completed_task_chunk("Ev1")]
+    assert runtime.slack.stop_stream.call_args.kwargs["chunks"] == [settled_task_chunk("Ev1", "COMPLETED")]
     assert runtime.slack_a2a.get_projection.return_value["status"] == "completed"
 
 
@@ -163,6 +166,18 @@ def test_push_retries_short_claim_then_reads_current_task(config, monkeypatch):
         slack_projector.handle_domain_event(runtime, update_event())
     service.get_task.assert_not_called()
     runtime.slack.post_reply.assert_not_called()
+
+
+def test_resumed_working_push_cannot_reopen_a_card_after_human_input(config, monkeypatch):
+    current = task(a2a.TaskState.TASK_STATE_WORKING)
+    runtime, _ = make_runtime(config, monkeypatch, current)
+    runtime.slack_a2a.get_projection.return_value["last_task_state"] = "WORKING"
+    runtime.slack_a2a.has_human_input_receipt.return_value = True
+    slack_projector.handle_domain_event(runtime, projection_event())
+    current.CopyFrom(task())
+    slack_projector.handle_domain_event(runtime, projection_event())
+    runtime.slack.start_stream.assert_not_called()
+    runtime.slack_preview_trigger.start.assert_not_called()
 
 
 def test_push_projects_to_each_slack_binding(config, monkeypatch):
@@ -221,3 +236,77 @@ def test_nonstreamed_answer_is_visible_with_optional_blocks(config, monkeypatch,
         assert any(block["type"] == "context" for block in blocks) == source_link
     else:
         assert not source_link
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_preview_hint_after_claim_release_once_and_failure_does_not_retry_p0(config, monkeypatch, enabled):
+    current = task(a2a.TaskState.TASK_STATE_WORKING)
+    current.ClearField("history")
+    runtime, _ = make_runtime(config, monkeypatch, current)
+    runtime.config = runtime.config.model_copy(
+        update={"preview_enabled": True, "slack_preview_enabled": enabled}
+    )
+
+    def fail_hint(hint):
+        runtime.slack_a2a.finish_stream.assert_called_once()
+        assert runtime.slack_a2a.get_projection.return_value["status"] == "pending"
+        assert (hint.binding_id, hint.task_id, hint.message_ts) == ("binding-1", "task-1", "2.1")
+        raise RuntimeError("sensitive response must not be logged")
+
+    runtime.slack_preview_trigger.start.side_effect = fail_hint
+    slack_projector.handle_domain_event(runtime, projection_event())
+    slack_projector.handle_domain_event(runtime, projection_event())
+    assert runtime.slack_preview_trigger.start.call_count == int(enabled)
+    assert all(not call.kwargs["fallback"] for call in runtime.slack_a2a.finish_stream.call_args_list)
+    runtime.slack.start_stream.assert_called_once()
+
+
+@pytest.mark.parametrize("stream_available", [True, False])
+def test_settled_or_failed_stream_start_never_schedules_preview(config, monkeypatch, stream_available):
+    runtime, _ = make_runtime(
+        config, monkeypatch, task() if stream_available else task(a2a.TaskState.TASK_STATE_WORKING)
+    )
+    runtime.config = runtime.config.model_copy(
+        update={"preview_enabled": True, "slack_preview_enabled": True}
+    )
+    if not stream_available:
+        runtime.slack.start_stream.side_effect = RuntimeError("missing_scope")
+    slack_projector.handle_domain_event(runtime, projection_event())
+    runtime.slack_preview_trigger.start.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("state", "title"),
+    [
+        ("COMPLETED", "Request complete"),
+        ("INPUT_REQUIRED", "Waiting for your answer"),
+        ("CANCELED", "Request stopped"),
+        ("FAILED", "Request failed"),
+        ("REJECTED", "Request rejected"),
+    ],
+)
+def test_every_settled_stream_replaces_draft_title_and_preserves_canonical_text(
+    config, monkeypatch, state, title
+):
+    from managed_agents_app.testing.recording_slack import RecordingSlack
+
+    current = task(a2a.TaskState.Value("TASK_STATE_" + state))
+    runtime, _ = make_runtime(config, monkeypatch, current)
+    slack = RecordingSlack()
+    ts = slack.start_stream(
+        "C1", "1.0", "T1", "U1", chunks=[working_task_chunk("Ev1", "https://example.test/source")]
+    )
+    slack.append_stream_chunks(
+        "C1",
+        ts,
+        [{"type": "task_update", "id": "request:Ev1", "title": "Draft: …wrong", "status": "in_progress"}],
+    )
+    assert slack.streams[ts]["text"] == ""
+    slack_projector._project_task(
+        runtime, slack, "binding-1", "task-1", "C1", "1.0", current, stream_ts=ts, request_id="Ev1"
+    )
+    card = slack.streams[ts]
+    assert card["text"] == "answer" and card["state"] == "completed"
+    assert card["tasks"]["request:Ev1"]["title"] == title
+    assert card["tasks"]["request:Ev1"]["sources"][0]["url"] == "https://example.test/source"
+    assert card["status"] == ("suspended" if state == "INPUT_REQUIRED" else "active")

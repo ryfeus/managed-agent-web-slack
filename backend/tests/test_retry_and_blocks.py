@@ -8,8 +8,8 @@ from slack_sdk.errors import SlackApiError
 
 from managed_agents_app.db.connection import with_dsql_retry
 from managed_agents_app.slack.blocks import (
-    completed_task_chunk,
     markdown_text_chunk,
+    settled_task_chunk,
     source_link_blocks,
     tool_approval_blocks,
     working_task_chunk,
@@ -49,7 +49,7 @@ def test_slack_blocks_contain_only_metadata_and_controls() -> None:
     assert working_task_chunk("Ev1", "https://example.test/message")["sources"][0]["text"] == (
         "Original message"
     )
-    assert completed_task_chunk("Ev1")["status"] == "complete"
+    assert settled_task_chunk("Ev1", "COMPLETED")["status"] == "complete"
     assert markdown_text_chunk("hello") == {"type": "markdown_text", "text": "hello"}
     assert source_link_blocks("https://example.test/message")[0]["type"] == "context"
     assert source_link_blocks(None) == []
@@ -81,7 +81,7 @@ def test_slack_stream_adapter_enforces_and_uses_chunk_mode() -> None:
 
     assert slack.start_stream("C1", "10.1", "T1", "U1", chunks=chunks, task_display_mode="timeline") == "10.2"
     slack.append_stream_chunks("C1", "10.2", [markdown_text_chunk("hello")])
-    slack.stop_stream("C1", "10.2", chunks=[completed_task_chunk("Ev1")])
+    slack.stop_stream("C1", "10.2", chunks=[settled_task_chunk("Ev1", "COMPLETED")])
 
     start = raw.chat_startStream.call_args.kwargs
     assert start["chunks"] == chunks
@@ -106,7 +106,7 @@ def test_stopping_an_already_closed_slack_stream_is_idempotent(sdk_exception) ->
     else:
         raw.chat_stopStream.return_value = response
     slack = SlackClient("xoxb-test", raw)
-    slack.stop_stream("C1", "10.2", chunks=[completed_task_chunk("Ev1")])
+    slack.stop_stream("C1", "10.2", chunks=[settled_task_chunk("Ev1", "COMPLETED")])
     raw.chat_stopStream.side_effect = SlackApiError("denied", {"error": "missing_scope"})
     with pytest.raises(SlackApiError):
         slack.stop_stream("C1", "10.2")

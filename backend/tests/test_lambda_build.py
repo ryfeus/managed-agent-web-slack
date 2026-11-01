@@ -27,7 +27,7 @@ def test_lambda_build_context_excludes_secrets_and_preserves_cache_boundaries(tm
     (checkout / ".env").write_text("secret")
     (checkout / "scripts").mkdir()
     (checkout / "scripts/Dockerfile.lambdas").write_text((SCRIPTS / "Dockerfile.lambdas").read_text())
-    for name in ("run_agui_bridge.sh", "run_cma_controller.sh", "run_a2a_event_sink.sh"):
+    for name in ("run_cma_controller.sh", "run_a2a_event_sink.sh"):
         (checkout / "backend" / name).write_text("launcher")
     (checkout / "services/openappa/target").mkdir(parents=True)
     (checkout / "services/openappa/Cargo.toml").write_text("fixture")

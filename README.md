@@ -7,7 +7,8 @@ A serverless reference application for continuing the same Anthropic Managed Age
 
 ```mermaid
 flowchart LR
-  Web[Web / assistant-ui] --> AGUI[AG-UI bridge]
+  Web[Web / assistant-ui HttpAgent] --> CF[CloudFront /api/*]
+  CF --> AGUI[Node 24 Web Function: HTTP / SSE]
   AGUI --> A2A[Private A2A controller]
   Slack[Signed Slack ingress] --> Input[Queued input]
   Input --> A2A
@@ -18,14 +19,25 @@ flowchart LR
   Timer[30-second reconciliation] --> Scheduler
   Scheduler --> Push[A2A push + GetTask]
   Push --> Projector[Short Slack projector]
-  CMA -. future P1 preview .-> Preview[Optional preview transport]
+  Scheduler -. disposable start hint .-> Queue[Private FIFO preview queue]
+  Queue --> Observer[Bounded TypeScript observer]
+  CMA -. assistant text SSE .-> Observer
+  Observer --> Preview[Private IAM AppSync Events]
+  Preview -. provisional text .-> AGUI
+  Projector -. card-start hint .-> SlackQueue[Optional Slack preview FIFO]
+  SlackQueue --> SlackPreview[Bounded Slack subscriber]
+  Preview -. same task channel .-> SlackPreview
+  SlackPreview -. rolling draft title .-> Card[Existing Slack task card]
+  Projector -->|canonical Markdown and final title| Card
 ```
 
 The durable P0 path completes without provider SSE or preview transport. OpenAPPA can automatically allow/deny or require review of an exact tool call. Web and Slack submit the first authorized human ruling; a fresh native OpenAPPA remedy must authorize it before CMA confirmation.
 
+Optional Slack previews show a rolling `Draft: …` title on an existing task card. Canonical Markdown remains authoritative. The same CMA reader feeds independent Web and Slack AppSync subscribers; drafts stay in memory. `SLACK_PREVIEW_ENABLED=false` is the default and enabling it also requires `PREVIEW_ENABLED=true`. See the [Phase 6 rollout note](docs/phase-6-rollout.md) for limits and remaining live acceptance.
+
 ## Run locally
 
-Prerequisites: Node 22 or 24, Python 3.14 through uv, Docker Compose, and the pinned Rust 1.99.0 toolchain. Install Chromium explicitly for browser tests.
+Prerequisites: Node 24, Python 3.14 through uv, Docker Compose, and the pinned Rust 1.99.0 toolchain. Install Chromium explicitly for browser tests.
 
 ```bash
 npm ci
@@ -59,6 +71,11 @@ npm run deploy:plan        # account checks + saved Terraform plan; no apply
 npm run deploy            # explicit real deployment
 ```
 
+Phase 5 previews default to disabled. Read the [public upgrade checkpoints and rollback procedure](docs/upgrading.md) before applying this branch; retiring Web resources requires a saved target-account plan and explicit approval. Use `--application-only` to avoid unrelated CMA, secret synchronization and database operations.
+
 Review [operations](docs/operations.md), [Managed Agent setup](docs/managed-agent-setup.md), and [Slack setup](docs/slack-setup.md) first. Definitions and genuine lock state live in `cma/`; deployments pin the exact agent version. Normal deployment never force/prunes CMA resources. Secrets and generated deployment outputs stay outside Git.
 
 See [architecture](docs/architecture.md), [contributing](CONTRIBUTING.md), and the [DSQL runbook](docs/dsql.md). Optional real-provider testing is API-only: `RUN_LIVE_E2E=1 npm run test:live`; it requires a configured developer sandbox and performs read-only preflight before sending messages.
+
+Report vulnerabilities privately using the process in [SECURITY.md](SECURITY.md).
+Do not include credentials or deployment details in public issues or pull requests.

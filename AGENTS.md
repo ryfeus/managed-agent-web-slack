@@ -2,7 +2,7 @@
 
 ## Invariants
 
-Web and Slack use authorized application threads and A2A Tasks. Only the private CMA controller uses Anthropic session/event APIs. CMA owns canonical transcripts and execution; DSQL holds identity, routing, idempotency, leases, projection state and opaque temporary-object keys, never transcripts, message bodies, tool arguments/output or reasoning.
+Web and Slack use authorized application threads and A2A Tasks. Only the private CMA controller mutates Anthropic sessions/events or owns canonical reconciliation. The isolated TypeScript preview worker may read disposable CMA SSE; its AppSync output is never authoritative. CMA owns canonical transcripts and execution; DSQL holds identity, routing, idempotency, leases, projection state and opaque temporary-object keys, never transcripts, message bodies, tool arguments/output, previews or reasoning.
 
 Read relevant implementation/tests before edits. Preserve Runtime/port composition; handlers do not construct provider clients. The active Task is the earliest nonterminal FIFO Task. Load canonical history before subscriptions and reconcile after closure; disconnect never cancels. Explicit Stop remains independent of policy.
 

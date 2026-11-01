@@ -58,7 +58,7 @@ jobs:
             dist/lambdas/a2a-event-sink.zip \
             dist/lambdas/web-function.zip \
             dist/lambdas/cma-preview.zip \
-            dist/lambdas/agui-bridge.zip \
+            dist/lambdas/slack-preview.zip \
             dist/lambdas/cma-controller.zip
       - run: ./scripts/check_terraform.sh
 

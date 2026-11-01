@@ -37,12 +37,32 @@ cookie secret; changing those is not part of this upgrade.
 
 ## Web rollout checkpoints
 
-This commit is the **CloudFront cutover checkpoint**. Its parent is the additive
-checkpoint, which retains the Python Web origin. This checkpoint routes `/api/*`
-to the IAM-protected TypeScript gateway and retains both Python Web Lambdas and
-their routes for rollback. Verify standalone connectivity before applying it,
-then verify authentication, history, review, clarification, Stop and Web/Slack
-continuity before proceeding to final retirement. Keep previews disabled.
+The following commits exist in this public repository. Use a separate clean
+checkout for each stage and preserve your deployment-specific configuration.
+
+| Stage | Public commit | Behavior |
+| --- | --- | --- |
+| Additive | `7907ef92e85918f7861fdd48f05d35031b93a877` | Adds policy/controller changes, standalone Web gateway and AppSync; Python Web remains the CloudFront origin. |
+| Cutover | `9a4488497077d9505b3f162e6ac039ca0bb3ac69` | Routes `/api/*` to TypeScript; retains Python Web Lambdas/routes for rollback. |
+| Retirement | Final release containing this runbook | Removes Python Web resources and adds optional Slack title previews. |
+
+Check out the additive commit first, complete the schema/CMA preparation and
+review the target-account plan. Verify the standalone gateway's IAM, private A2A
+and DSQL connectivity. Then check out the cutover commit and review its plan.
+Verify cookie login, canonical history/reload, human review, clarification, Stop
+and Web/Slack continuity through CloudFront before proceeding to retirement.
+
+The final plan intentionally removes superseded Web resources and is rejected by
+the normal deletion guard. Inspect the saved plan and exact resource addresses;
+only an explicitly authorized operator may apply that reviewed retirement plan
+with Terraform. Do not weaken the guard. If a combined plan has a dependency cycle,
+review separate route/permission and Lambda/role/log/artifact retirement steps.
+Confirm the deployed API stage no longer exports the old Web paths. Preserve DSQL,
+buckets, queues, networks, APIs, stages and the CloudFront distribution.
+
+Keep `PREVIEW_ENABLED=false` and, on the final release,
+`SLACK_PREVIEW_ENABLED=false`. Preview enablement is separate opt-in acceptance;
+see [Web rollout](phase-5-rollout.md) and [Slack previews](phase-6-rollout.md).
 
 At each checkpoint, keep `PREVIEW_ENABLED=false`. Use
 `npm run deploy:plan -- --application-only` to save a target-account plan, review

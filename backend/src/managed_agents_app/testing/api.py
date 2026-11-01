@@ -61,6 +61,7 @@ def router(runtime: Runtime) -> APIRouter:
         validate_local_database(runtime.config)
         faults.reset()
         harness.reset()
+        runtime.slack_preview_trigger = None
         bus.reset()
         queue.reset()
         slack.reset()

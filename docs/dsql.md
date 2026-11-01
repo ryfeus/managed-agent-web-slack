@@ -20,7 +20,9 @@ grant table DML privileges. Deployed Lambdas retain only `dsql:DbConnect`, never
 `DbConnectAdmin`.
 
 The Aurora DSQL Psycopg connector generates IAM authentication tokens and requires
-TLS with `sslmode=require`; no database password exists.
+TLS with `sslmode=require`; no database password exists. The TypeScript Web Function uses the official Aurora DSQL postgres.js connector with certificate validation. Its new IAM role must be granted the existing `app_runtime` database role before cutover; Terraform IAM `dsql:DbConnect` alone is insufficient. Phase 5 adds no tables, columns or transcript store.
+
+The Phase 6 Slack preview execution role also needs an explicit `AWS IAM GRANT app_runtime` before enabling its queue mapping. Use Terraform's `dsql_runtime_role_arns` output as the role source. IAM `dsql:DbConnect` alone does not authorize the database role. This worker shares the existing projection claim fields and adds no tables or columns. The shared `app_runtime` role retains broad application DML; the small worker repository limits itself to metadata reads and fenced projection claims, not a separate SQL security boundary.
 
 ## Schema
 

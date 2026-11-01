@@ -38,6 +38,7 @@ class LocalA2AHarness:
         self.bus = bus
         self.provider = FakeCmaProvider()
         self.preview_trigger = LocalPreviewTrigger()
+        self.slack_preview_trigger = LocalPreviewTrigger()
         self.scheduler_trigger = LocalSchedulerTrigger()
         self.push_trigger = AsyncLocalPushTrigger()
         self.pending_directory = Path(tempfile.mkdtemp(prefix="slack-a2a-e2e-"))
@@ -109,6 +110,7 @@ class LocalA2AHarness:
     def reset(self) -> None:
         self.composition.scheduler.preview_trigger = None
         self.preview_trigger.hints.clear()
+        self.slack_preview_trigger.hints.clear()
         self.preview_trigger.streams = 0
         self.composition.scheduler.policy_engine = self.baseline_policy
         self.provider.sessions.clear()

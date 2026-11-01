@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 from a2a.types import TaskState
-from ag_ui.core import RunStartedEvent
 from pydantic import TypeAdapter, ValidationError
 
 from managed_agents_app.agents.registry import AgentRegistration, AgentRegistry, from_config
@@ -36,7 +35,6 @@ def test_profile_matches_pinned_protocol_baseline() -> None:
     assert ControllerBehavior().human_input is False
     assert ControllerBehavior(human_input=True) == CMA_INITIAL_BEHAVIOR
     assert TaskState.Name(TaskState.TASK_STATE_INPUT_REQUIRED) == "TASK_STATE_INPUT_REQUIRED"
-    assert {"thread_id", "run_id"} <= set(RunStartedEvent.model_fields)
 
 
 def test_human_input_wire_payloads_and_responses() -> None:

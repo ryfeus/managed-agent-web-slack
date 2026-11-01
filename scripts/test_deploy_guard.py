@@ -106,6 +106,12 @@ class DeploymentGuardTests(unittest.TestCase):
     def test_unrelated_core_deletions_remain_blocked(self) -> None:
         candidates = {
             "aws_dsql_cluster.app",
+            "aws_cloudformation_stack.web_function",
+            "aws_appsync_api.preview",
+            "aws_subnet.web_private",
+            'aws_lambda_function.app["web-api"]',
+            'aws_lambda_function.app["agui-bridge"]',
+            'aws_s3_object.lambda_artifact["agui-bridge.zip"]',
             "aws_s3_bucket.lambda_artifacts",
             "aws_s3_bucket_versioning.lambda_artifacts",
             'aws_s3_object.lambda_artifact["python-buffered.zip"]',

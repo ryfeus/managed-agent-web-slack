@@ -2,15 +2,23 @@
 
 | Command | Evidence |
 | --- | --- |
-| `npm run check` | Pinned native Rust build/tests, local CMA lock validation, destructive-deploy guard, ESLint/Ruff/format, TypeScript/mypy, Python unit/contracts and E2E helper tests; no Docker/cloud/browser |
+| `npm run check` | Pinned native Rust build/tests, local CMA lock validation, destructive-deploy guard, ESLint/Ruff/format, TypeScript/mypy, Python unit/contracts, E2E helpers and TypeScript gateway/observer/AppSync protocol tests; no Docker/cloud/browser |
 | `npm run e2e` | Isolated PostgreSQL migrations/transactions, official A2A SDK interoperability and push, controller recovery, signed Slack ingress, real AG-UI HTTP and semantic Playwright |
-| `npm run e2e:production` | Static-exported Web authentication/history/Stop smoke |
+| `npm run e2e:production` | Static-exported Web and bundled Node gateway authentication/history/navigation smoke |
 | `npm run build` | Web export plus minimal-context, cached Lambda packages and artifact validation |
-| `npm run terraform:validate` | Both roots' validation and mocked deployment-resource tests |
+| `npm run terraform:validate` | Official offline SAM transform/CloudFormation schema checks, both Terraform roots, and mocked resource/network/IAM/rollback tests |
 | `npm run secrets:check` | Pinned Gitleaks 8.24.3, redacted scan of tracked and nonignored untracked files |
 | `npm run verify:full` | Check, production Web, Lambda artifacts, Terraform and full local E2E |
 
-Install dependencies/browser explicitly as described in [local development](local-development.md). CI runs these stages separately and retains failing browser artifacts. The standard scanner replaces private identifier/credential regexes; install the exact Gitleaks release (CI verifies its release archive checksum). Public export includes only tracked distributable files and excludes plans, dotenv/runtime/generated material and symlinks.
+Install dependencies/browser explicitly as described in [local development](local-development.md). CI runs these stages separately and retains failing browser artifacts. Gitleaks checks credentials; the retained publication check in `npm run check` separately rejects known private deployment identifiers. Install the exact Gitleaks release (CI verifies its release archive checksum). Public export includes only tracked distributable files and excludes plans, dotenv/runtime/generated material and symlinks.
+
+See [Phase 5 implementation and rollout evidence](phase-5-rollout.md) for baseline and final local results. Preview tests use real local HTTP SSE and WebSocket frames but fake CMA/AppSync services; no local command activates previews in AWS.
+
+## Slack preview evidence
+
+Phase 6 adds worker tests for title escaping/Unicode, offsets, duplicate/gapped frames, throttling, the forty-call budget, deadline cleanup, stale hints and Slack errors. Cross-language PostgreSQL tests contend a TypeScript preview claim with the Python projector, expire the preview lease and prove terminal/input-required fencing and unchanged P0 receipts. `e2e/slack-preview.spec.ts` uses the existing loopback AppSync WebSocket adapter and `RecordingSlack`: one CMA reader feeds Web plus Slack, drafts never enter canonical Markdown, outages/ambiguous appends preserve the final answer, and native human review closes the draft card. The recorder models replacement by task ID, preserving source links.
+
+The existing local preview fixture also dispatches Slack hints; there is no extra supervisor or live credential. The isolated stack sets both environment switches, while each test opts in with `/_test/slack-preview-control`; reset disables that trigger. `/_test/preview-control` separately controls the existing producer. These routes exist only in local mode. `npm run e2e -- --grep 'Slack preview|Slack and Web share|human input closes'` runs focused acceptance after PostgreSQL checks. Production defaults remain disabled. Local replacement assertions do not establish native Slack-client rendering; see [Phase 6 rollout](phase-6-rollout.md).
 
 ## Human-input evidence
 
@@ -36,14 +44,22 @@ The independent preflight loads `.env`, checks STS (and `EXPECTED_AWS_ACCOUNT_ID
 
 For other live Playwright cases, run the same preflight from `scripts/live.py` before invoking `playwright.live.config.ts`; preserve its opt-in environment gate. Direct DSQL/Anthropic contract tests in `backend/tests/integration/test_real_services.py` require `RUN_INTEGRATION_TESTS=1` and are never included in local/CI checks.
 
-Historical Phase 3 acceptance on 2026-10-31 proved genuine Slack delivery, stateless automatic allow/deny, clarification and Stop. It did not prove the newly added human-review remedy.
+Historical sandbox acceptance on 2026-10-31 verified genuine Slack delivery,
+stateless automatic policy, clarification, Stop and native human review. Web Allow
+survived reload; signed Slack Deny/duplicates and pending-review Stop produced
+one corresponding provider action. Controls retired across surfaces and canonical
+answers remained visible. These historical results are distinct from public-branch
+verification and from native Slack-client acceptance.
 
-Authorized Phase 4 sandbox acceptance on 2026-10-31 passed genuine mention/reply delivery, exact-message receipts/source links, automatic `web_fetch`, clarification/Stop, and all three native human-review cases. Web Allow survived reload and produced one CMA allow plus one successful result; signed Slack Deny/duplicates produced one deny plus an error result; pending-review Stop produced one interrupt, no allow and an interrupted result. Web/Slack arguments matched, controls retired across surfaces, and completed turns had one visible answer. Direct DSQL/CMA checks also verified the deployed session's exact version/environment. The original policy/artifact was restored and its hash checked after testing.
+The updated manifest was validated through the Slack configuration API with seven
+required bot scopes, five events, no unfurls and Socket Mode disabled. Existing
+organization/user OAuth settings were retained. Tests used an existing token with
+additional historical grants; a fresh token limited to the seven scopes remains
+unverified. Manifest updates alone do not revoke existing token grants.
 
-Live verification exposed and fixed DSQL's unsupported inline constraint on added columns, the scheduler's missing `s3:PutObject` permission on the existing private pending prefix, and Slack's automatic URL rewriting in tool arguments (now `verbatim`). Migration preserved all 213 prior Tasks and 76 prior requests. Native Slack-client interaction remains unverified.
-
-The Phase 4 Slack manifest was subsequently applied through the configuration API and verified by export: seven required bot scopes, five event types, no unfurls, and Socket Mode disabled. Existing organization readiness, user OAuth and MCP settings were preserved. Slack returned `permissions_updated: true`; the existing bot token still has `im:read`, `im:write`, `links:read`, `reactions:read` and `users:read`. Removing these existing grants requires a separate credential change under [Slack's token lifecycle rules](https://docs.slack.dev/app-management/distribution/).
-
-After the manifest update, genuine mention/reply smoke and all three live automatic-policy/clarification/Stop tests passed with the existing token. This confirms delivery and runtime behavior; a newly issued token limited to the seven configured scopes has not been tested.
-
-Final health checks matched all ten Lambda code hashes to the built artifacts, found no active Tasks, and observed all working queues drain. No new dead letters appeared; the 18 historical push dead letters were retained. The only post-deployment Terraform difference was AWS expanding the private API policy's shorthand resource into its equivalent ARN.
+The TypeScript gateway subsequently passed Web/Slack continuity and native review
+acceptance, including two live preview subscribers sharing one observer. Other
+turns completed without previews. The original policy was restored after testing
+and previews were disabled. See [Web rollout evidence](phase-5-rollout.md) and
+[Slack preview limits](phase-6-rollout.md). No live acceptance runs automatically
+in local verification or CI.

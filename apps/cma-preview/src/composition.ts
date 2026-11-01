@@ -15,7 +15,7 @@ export async function compose(env: NodeJS.ProcessEnv): Promise<ObserverPorts> {
     if (!key) throw new Error("Missing observer credential");
   }
   if (local && (!env.LOCAL_CMA_URL || !["127.0.0.1", "localhost"].includes(new URL(env.LOCAL_CMA_URL).hostname))) throw new Error("Local CMA must use loopback");
-  const provider = new Anthropic({ apiKey: key, maxRetries: 0, timeout: 125000, ...(local ? { baseURL: env.LOCAL_CMA_URL } : {}) });
+  const provider = new Anthropic({ apiKey: key, maxRetries: 0, timeout: 125000, logLevel: "off", ...(local ? { baseURL: env.LOCAL_CMA_URL } : {}) });
   const client = await new ClientFactory({ transports: [new RestTransportFactory({ fetchImpl: (url, init) => fetch(url, { ...init, signal: init?.signal || AbortSignal.timeout(5000) }) })] }).createFromUrl(env.CMA_A2A_ENDPOINT!.replace(/\/$/, "") + "/.well-known/agent-card.json", "");
   const preview = appSync({ httpUrl: env.APPSYNC_HTTP_URL!, websocketUrl: env.APPSYNC_WEBSOCKET_URL!, region: env.AWS_REGION || "us-west-2", local });
   return {

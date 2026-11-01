@@ -57,7 +57,7 @@ for ruling, decision in [('approve', 'allow'), ('deny', 'deny')]:
     request['resolve']['ruling'] = ruling
     assert native(request)['decision'] == decision
 output = Path('/output')
-for name, launcher in [('python-buffered', None), ('agui-bridge', 'run_agui_bridge.sh'), ('cma-controller', 'run_cma_controller.sh'), ('a2a-event-sink', 'run_a2a_event_sink.sh')]:
+for name, launcher in [('python-buffered', None), ('cma-controller', 'run_cma_controller.sh'), ('a2a-event-sink', 'run_a2a_event_sink.sh')]:
     target = output / 'lambdas' / name
     shutil.copytree(output / 'python-package', target)
     shutil.copytree('/build/managed_agents_app', target / 'managed_agents_app')

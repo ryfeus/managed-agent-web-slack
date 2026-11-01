@@ -14,7 +14,7 @@
     "build:web": "npm run build -w @managed-agents/web",
     "build:python": "./scripts/build_python_lambdas.sh",
     "dev": "PYTHONDONTWRITEBYTECODE=1 python3 scripts/local.py dev",
-    "lint": "PYTHONDONTWRITEBYTECODE=1 eslint apps/web apps/web-function apps/cma-preview apps/preview e2e playwright.config.ts playwright.live.config.ts playwright.production.config.ts && UV_CACHE_DIR=.uv-cache uv run --directory backend ruff check src tests ../scripts",
+    "lint": "PYTHONDONTWRITEBYTECODE=1 eslint apps/web apps/web-function apps/cma-preview apps/preview apps/slack-preview e2e playwright.config.ts playwright.live.config.ts playwright.production.config.ts && UV_CACHE_DIR=.uv-cache uv run --directory backend ruff check src tests ../scripts",
     "format:check:python": "PYTHONDONTWRITEBYTECODE=1 UV_CACHE_DIR=.uv-cache uv run --directory backend ruff format --check src tests ../scripts",
     "format:python": "PYTHONDONTWRITEBYTECODE=1 UV_CACHE_DIR=.uv-cache uv run --directory backend ruff format src tests ../scripts",
     "typecheck": "PYTHONDONTWRITEBYTECODE=1 npm run typecheck -w @managed-agents/web && tsc -p e2e/tsconfig.json && UV_CACHE_DIR=.uv-cache uv run --directory backend mypy src && npm run typecheck:functions",
@@ -40,8 +40,8 @@
     "check": "./scripts/check.sh",
     "verify:full": "npm run check && npm run e2e:production && npm run build:python && npm run build:functions && npm run terraform:validate && npm run e2e",
     "secrets:check": "python3 scripts/scan_secrets.py",
-    "test:functions": "vitest run apps/web-function/tests apps/cma-preview/tests apps/preview/tests",
-    "typecheck:functions": "npm run typecheck -w @managed-agents/web-function && npm run typecheck -w @managed-agents/cma-preview && npm run typecheck -w @managed-agents/preview",
+    "test:functions": "vitest run apps/web-function/tests apps/cma-preview/tests apps/preview/tests apps/slack-preview/tests",
+    "typecheck:functions": "npm run typecheck -w @managed-agents/web-function && npm run typecheck -w @managed-agents/cma-preview && npm run typecheck -w @managed-agents/preview && npm run typecheck -w @managed-agents/slack-preview",
     "build:functions": "node scripts/build_functions.mjs"
   },
   "devDependencies": {

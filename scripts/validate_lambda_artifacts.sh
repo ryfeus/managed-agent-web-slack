@@ -2,6 +2,14 @@
 set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 cd "$(dirname "$0")/.."
+if [[ "${1:-}" == "--functions" ]]; then
+  for artifact in dist/lambdas/web-function.zip dist/lambdas/cma-preview.zip dist/lambdas/slack-preview.zip; do
+    [[ -s "$artifact" ]] || { echo "Missing Function artifact: $artifact" >&2; exit 1; }
+    unzip -t "$artifact" >/dev/null
+    unzip -p "$artifact" index.js | node --input-type=module --check
+  done
+  exit 0
+fi
 if find dist/python-package -name '*.so' -print -quit | grep -q .; then
   invalid_native="$(find dist/python-package -name '*.so' -print0 | xargs -0 file | grep -Ev 'ELF 64-bit.*x86-64' || true)"
   if [[ -n "$invalid_native" ]]; then
@@ -10,7 +18,7 @@ if find dist/python-package -name '*.so' -print -quit | grep -q .; then
   fi
 fi
 
-for artifact in dist/lambdas/python-buffered.zip dist/lambdas/agui-bridge.zip dist/lambdas/cma-controller.zip dist/lambdas/a2a-event-sink.zip; do
+for artifact in dist/lambdas/python-buffered.zip dist/lambdas/cma-controller.zip dist/lambdas/a2a-event-sink.zip; do
   if [[ ! -s "$artifact" ]]; then
     echo "Missing Lambda artifact: $artifact" >&2
     exit 1
@@ -36,10 +44,6 @@ with ZipFile(artifact) as archive:
 PY
 done
 
-if [[ ! -x dist/lambdas/agui-bridge/run.sh ]]; then
-  echo "Lambda AG-UI bridge launcher is not executable." >&2
-  exit 1
-fi
 if [[ ! -x dist/lambdas/cma-controller/run.sh ]]; then
   echo "Lambda CMA controller launcher is not executable." >&2
   exit 1

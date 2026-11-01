@@ -61,6 +61,7 @@ def local_env(ports: dict[str, int]) -> dict[str, str]:
             "A2A_EVENT_SINK_URL": "http://a2a-sink.local/internal/a2a/events",
             "AWS_LAMBDA_HTTP_ENDPOINT": f"127.0.0.1:{ports['backend']}",
             "PREVIEW_ENABLED": "true",
+            "SLACK_PREVIEW_ENABLED": "true",
             "APPSYNC_HTTP_URL": f"http://127.0.0.1:{ports.get('preview', 3003)}/event",
             "APPSYNC_WEBSOCKET_URL": f"ws://127.0.0.1:{ports.get('preview', 3003)}/event/realtime",
             "LOCAL_PREVIEW_PORT": str(ports.get("preview", 3003)),
@@ -82,7 +83,7 @@ def prerequisites() -> None:
 
 
 def ports() -> dict[str, int]:
-    # Reserve the three choices together. A later competing bind fails startup;
+    # Reserve all choices together. A later competing bind fails startup;
     # the runner never kills a listener or tears down another Compose project.
     with contextlib.ExitStack() as stack:
         result = {}
@@ -182,7 +183,16 @@ class Stack:
                 env=self.env | {"RUN_POSTGRES_TESTS": "1"},
                 timeout=600,
             )
-            self.run(["node", "--import", "tsx", "--test", "apps/web-function/tests/repository.postgres.ts"])
+            self.run(
+                [
+                    "node",
+                    "--import",
+                    "tsx",
+                    "--test",
+                    "apps/web-function/tests/repository.postgres.ts",
+                    "apps/slack-preview/tests/repository.postgres.ts",
+                ]
+            )
         backend = [
             str(PYTHON),
             "-m",
@@ -197,7 +207,11 @@ class Stack:
             backend += ["--reload", "--reload-dir", str(ROOT / "backend/src")]
         self.spawn(backend, "backend")
         self.spawn(["node", "--import", "tsx", "apps/cma-preview/src/local.ts"], "preview")
-        self.spawn(["node", "--import", "tsx", "apps/web-function/src/index.ts"], "web-function")
+        if self.mode == "production":
+            self.run(["npm", "run", "build:functions"])
+            self.spawn(["node", "dist/web-function/index.js"], "web-function")
+        else:
+            self.spawn(["node", "--import", "tsx", "apps/web-function/src/index.ts"], "web-function")
         if self.mode == "production":
             self.run(["npm", "run", "build:web"])
             self.spawn(

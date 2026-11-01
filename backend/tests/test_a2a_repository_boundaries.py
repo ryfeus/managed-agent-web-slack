@@ -53,7 +53,7 @@ def test_application_surfaces_do_not_import_the_private_provider():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "src/managed_agents_app"
-    for directory in ("agui_bridge", "agent_control_plane", "slack", "handlers"):
+    for directory in ("agent_control_plane", "slack", "handlers"):
         for path in (root / directory).glob("*.py"):
             modules = []
             for node in ast.walk(ast.parse(path.read_text())):

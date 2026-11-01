@@ -29,6 +29,8 @@ class AppConfig(BaseModel):
     cma_push_queue_url: str = ""
     cma_preview_queue_url: str = ""
     preview_enabled: bool = False
+    slack_preview_enabled: bool = False
+    slack_preview_queue_url: str = ""
     cma_pending_input_bucket: str = ""
     openappa_binary_path: str = ""
     openappa_policy_path: str = ""
@@ -133,6 +135,8 @@ def load_config() -> AppConfig:
         cma_push_queue_url=os.getenv("CMA_PUSH_QUEUE_URL", "").strip(),
         cma_preview_queue_url=os.getenv("CMA_PREVIEW_QUEUE_URL", "").strip(),
         preview_enabled=_flag("PREVIEW_ENABLED"),
+        slack_preview_enabled=_flag("SLACK_PREVIEW_ENABLED"),
+        slack_preview_queue_url=os.getenv("SLACK_PREVIEW_QUEUE_URL", "").strip(),
         cma_pending_input_bucket=os.getenv("CMA_PENDING_INPUT_BUCKET", "").strip(),
         openappa_binary_path=os.getenv("OPENAPPA_BINARY_PATH", ""),
         openappa_policy_path=os.getenv("OPENAPPA_POLICY_PATH", ""),

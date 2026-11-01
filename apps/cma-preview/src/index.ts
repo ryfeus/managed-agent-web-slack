@@ -6,6 +6,7 @@ import { observe, parseHint } from "./observer.js";
 export async function handler(event: SQSEvent, context: Context) {
   if (process.env.PREVIEW_ENABLED !== "true") return;
   for (const record of event.Records) {
+    if (Number(record.attributes.ApproximateReceiveCount) > 1) { metric("preview_retry_dropped"); continue; }
     const hint = parseHint(record.body);
     if (!hint) { metric("preview_hint_dropped"); continue; }
     // Expected P1 failures are acknowledged. Infrastructure crashes have bounded SQS redelivery.

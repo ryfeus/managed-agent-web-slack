@@ -7,10 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from starlette.concurrency import run_in_threadpool
 
-from managed_agents_app.agui_bridge.app import create_app as create_agui_app
 from managed_agents_app.cma_controller import webhook as anthropic_webhook
 from managed_agents_app.config import local_cors_origins
-from managed_agents_app.handlers import slack_ingress, web_api
+from managed_agents_app.handlers import slack_ingress
 from managed_agents_app.runtime import Runtime, get_runtime
 from managed_agents_app.testing.factory import LocalA2AHarness
 
@@ -30,9 +29,8 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
         from managed_agents_app.testing.preview import preview_router
 
         app.include_router(router(runtime))
-        app.include_router(preview_router(runtime.local_a2a))
+        app.include_router(preview_router(runtime))
         app.mount("/a2a", cast(LocalA2AHarness, runtime.local_a2a).controller)
-    app.include_router(create_agui_app(runtime).router)
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "DELETE", "OPTIONS"])
     async def buffered_api(path: str, request: Request) -> Response:
@@ -44,12 +42,12 @@ def create_app(runtime: Runtime | None = None) -> FastAPI:
             "body": body.decode(),
             "isBase64Encoded": False,
         }
-        if path == "slack/events":
+        if path in {"slack/events", "slack/interactions"}:
             result = await run_in_threadpool(slack_ingress.handle_request, runtime, event)
         elif path == "anthropic/webhook":
             result = await run_in_threadpool(anthropic_webhook.handle_request, runtime.config, event)
         else:
-            result = await run_in_threadpool(web_api.handle_request, runtime, event)
+            return Response(status_code=404)
         return Response(
             content=result["body"],
             status_code=result["statusCode"],

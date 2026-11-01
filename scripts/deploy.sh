@@ -115,6 +115,7 @@ configure_terraform_inputs() {
   local existing_url
   existing_url="$(terraform -chdir=infra/app output -raw application_url 2>/dev/null || true)"
   export TF_VAR_preview_enabled="${PREVIEW_ENABLED:-false}"
+  export TF_VAR_slack_preview_enabled="${SLACK_PREVIEW_ENABLED:-false}"
   export TF_VAR_openappa_timeout_seconds="${OPENAPPA_TIMEOUT_SECONDS:-10}"
   export TF_VAR_app_name="$app_name_value"
   export TF_VAR_environment="$environment_value"

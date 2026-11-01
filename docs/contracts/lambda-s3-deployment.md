@@ -5,8 +5,11 @@
 `./scripts/deploy.sh` uploads each built Lambda ZIP once to a private S3 bucket
 in the application's region. Functions sharing a ZIP use the same object version;
 Lambda code updates pass bucket/key/version instead of uploading the ZIP again.
-The existing build, plan review, secret sync, migrations and frontend flow remain.
-Runtime behavior, dependency splitting and verification shortcuts are out of scope.
+Phase 6 builds six distinct ZIPs: shared buffered Python, private A2A controller,
+A2A event sink, TypeScript Web Function, CMA preview and Slack preview Event Functions. The Web Function
+uses the same versioned objects through its Terraform-owned SAM stack. The normal
+deployment flow remains; `--application-only` skips CMA changes, secret sync and
+database migration/seed for an explicitly authorized application cutover.
 
 ## Invariants and security
 
@@ -19,7 +22,8 @@ Runtime behavior, dependency splitting and verification shortcuts are out of sco
 - Uploads depend on versioning, encryption, public-access blocking and TLS-only
   bucket policy. The bucket is in the same region as the functions.
 - Deployment credentials handle artifacts; Lambda execution roles gain no bucket
-  permissions. No secrets or generated identifiers enter source control.
+  permissions. The Lambda service gets scoped read/version-read permission for
+  the Web Function artifact and its revision ARN. No secrets or generated identifiers enter source control.
 - The existing destructive-change guard protects the bucket and objects.
 
 ## Failure, retry and concurrency
@@ -30,6 +34,9 @@ normal command; completed uploads are reused when their bytes are unchanged.
 There is no all-functions atomic rollout. Prior object versions are retained;
 rollback uses the desired source/build and the normal deployment path. Bucket
 deletion cannot force-remove artifacts. Artifact retention cleanup is manual.
+Web Functions also retain replaced immutable revisions for a reviewed revision-weight
+rollback. See the [Phase 5 staged procedure](../phase-5-rollout.md) before retiring
+the old Web routes; restoring their origin after retirement requires restoring resources.
 
 ## Verification
 

@@ -102,7 +102,7 @@ def main():
                 ROOT / "services/openappa", context / "openappa", ignore=shutil.ignore_patterns("target")
             )
             (context / "launchers").mkdir()
-            for name in ("run_agui_bridge.sh", "run_cma_controller.sh", "run_a2a_event_sink.sh"):
+            for name in ("run_cma_controller.sh", "run_a2a_event_sink.sh"):
                 shutil.copy(ROOT / "backend" / name, context / "launchers" / name)
             archive_path = Path(directory) / "artifacts.tar"
             run(

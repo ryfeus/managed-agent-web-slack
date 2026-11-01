@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
 from typing import Any, Protocol
 
 from managed_agents_app.managed_agent.client import ManagedAgentClient
@@ -25,7 +25,6 @@ class CmaProvider(Protocol):
         self, session_id: str, custom_tool_use_id: str, answer: str, *, is_error: bool = False
     ) -> None: ...
     async def interrupt(self, session_id: str) -> None: ...
-    def stream_events(self, session_id: str) -> AsyncIterator[dict[str, Any]]: ...
 
 
 class DefinitiveProviderError(RuntimeError):
@@ -86,18 +85,3 @@ class AnthropicCmaProvider:
 
     async def interrupt(self, session_id: str) -> None:
         await _invoke(self.client.interrupt, session_id)
-
-    async def stream_events(self, session_id: str) -> AsyncIterator[dict[str, Any]]:
-        # The SDK iterator is synchronous. A single bridge keeps the controller async.
-        iterator = self.client.stream_events(session_id, include_thinking=False)
-        sentinel = object()
-
-        def next_event() -> object:
-            try:
-                return next(iterator)
-            except StopIteration:
-                return sentinel
-
-        while (item := await blocking("provider_stream_next", next_event)) is not sentinel:
-            assert isinstance(item, dict)
-            yield item

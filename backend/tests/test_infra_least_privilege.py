@@ -11,12 +11,15 @@ def _section(start: str, end: str) -> str:
 
 def test_surface_lambdas_cannot_read_anthropic_secret() -> None:
     grants = _section("  secret_access = {", "  common_environment = {")
-    for name in ("web-api", "agui-bridge", "slack-ingress", "agent-input", "slack-projector"):
+    for name in ("slack-ingress", "agent-input", "slack-projector"):
         line = next(value for value in grants.splitlines() if value.strip().startswith(f"{name} "))
         assert "anthropic_api_key" not in line
     for name in ("cma-scheduler", "cma-push", "cma-controller"):
         line = next(value for value in grants.splitlines() if value.strip().startswith(f"{name} "))
         assert "anthropic_api_key" in line
+    web = (Path(__file__).resolve().parents[2] / "infra/app/web_function.tf").read_text()
+    assert "anthropic_api_key" not in web
+    assert "web_access_token.arn" in web and "web_cookie_secret.arn" in web
 
 
 def test_provider_configuration_stays_in_controller_environment() -> None:

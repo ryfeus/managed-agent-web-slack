@@ -28,11 +28,18 @@ def working_task_chunk(request_id: str, permalink: str | None = None) -> dict[st
     return chunk
 
 
-def completed_task_chunk(request_id: str) -> dict[str, Any]:
+def settled_task_chunk(request_id: str, state: str, *, approval: bool = False) -> dict[str, Any]:
+    title = {
+        "COMPLETED": "Request complete",
+        "INPUT_REQUIRED": "Waiting for your approval" if approval else "Waiting for your answer",
+        "CANCELED": "Request stopped",
+        "FAILED": "Request failed",
+        "REJECTED": "Request rejected",
+    }.get(state, "Request ended")
     return {
         "type": "task_update",
         "id": f"request:{request_id}",
-        "title": "Request complete",
+        "title": title,
         "status": "complete",
     }
 

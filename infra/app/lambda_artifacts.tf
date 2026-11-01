@@ -48,7 +48,7 @@ resource "aws_s3_bucket_policy" "lambda_artifacts" {
 }
 
 resource "aws_s3_object" "lambda_artifact" {
-  for_each     = toset(concat(values(local.lambda_artifacts), ["web-function.zip", "cma-preview.zip"]))
+  for_each     = toset(concat(values(local.lambda_artifacts), ["web-function.zip", "cma-preview.zip", "slack-preview.zip"]))
   bucket       = aws_s3_bucket.lambda_artifacts.id
   key          = "lambda/${each.key}"
   source       = "${path.module}/../../dist/lambdas/${each.key}"

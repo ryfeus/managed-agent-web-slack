@@ -8,7 +8,6 @@ from threading import Event
 import pytest
 
 from managed_agents_app import observability
-from managed_agents_app.cma_controller.provider import AnthropicCmaProvider
 
 
 @pytest.mark.asyncio
@@ -74,58 +73,3 @@ async def test_cancelled_waiter_does_not_hide_running_worker_or_executor_queue_w
     finally:
         release.set()
         await asyncio.gather(read, return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_provider_stream_cancellation_leaves_reader_blocking_canonical_work():
-    # reproduce the actual adapter's live starvation mechanism without credentials.
-    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=1))
-    entered, release, finished, closed = Event(), Event(), Event(), Event()
-
-    class Iterator:
-        def __iter__(self):
-            return self
-
-        def __next__(self):
-            entered.set()
-            try:
-                if not release.wait(2):
-                    raise TimeoutError("fixture release deadline")
-                raise StopIteration
-            finally:
-                finished.set()
-
-        def close(self):
-            closed.set()
-
-    class Client:
-        def stream_events(self, session_id, *, include_thinking):
-            assert not include_thinking
-            return Iterator()
-
-        def list_events(self, session_id):
-            return [{"type": "session.status_idle"}]
-
-    provider = AnthropicCmaProvider(Client())
-    stream = provider.stream_events("fixture")
-    reader = asyncio.create_task(anext(stream))
-    lookup = None
-    try:
-        async with asyncio.timeout(1):
-            while not entered.is_set():
-                await asyncio.sleep(0.001)
-        reader.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await reader
-        assert not finished.is_set()
-        assert not closed.is_set()
-        lookup = asyncio.create_task(provider.list_events("fixture"))
-        await asyncio.sleep(0.025)
-        assert not lookup.done()
-        release.set()
-        assert await asyncio.wait_for(lookup, 1) == [{"type": "session.status_idle"}]
-        assert finished.is_set()
-    finally:
-        release.set()
-        await asyncio.gather(reader, *([lookup] if lookup else []), return_exceptions=True)
-        await stream.aclose()

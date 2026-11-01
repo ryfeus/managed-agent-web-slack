@@ -16,6 +16,14 @@ Normal deployment applies CMA definitions, resolves the exact agent version/envi
 
 Serialize applies. Retain, review and commit partial CMA lock updates; never automatically force/prune or discard them. Remote edits block normal apply, and a successful dry-run exit can still display a blocked plan. Revert/apply/redeploy the intended agent definition for rollback. Environments are ID-based and require independent rollback/new-session validation. See [Managed Agent setup](managed-agent-setup.md).
 
+## Phase 5 cutover
+
+Follow [the public upgrade checkpoints](upgrading.md) and [Web rollout notes](phase-5-rollout.md). `npm run deploy:plan -- --application-only` saves a plan without CMA changes. Application-only deployment also skips secret synchronization and database migration/seed; complete required schema and role setup explicitly. The final tree removes Python Web resources, so existing installations must first complete additive and cutover acceptance. Deletion guards remain unchanged. Retained Web Function revisions provide rollback after retirement; use Terraform outputs and endpoint revision weights for the actual deployment.
+
+## Phase 6 Slack previews
+
+[Slack preview rollout](phase-6-rollout.md) requires the producer plus a separate consumer role and API-only live acceptance. Both switches default to false. Verify the new role's DSQL association and actual IAM subscription before enabling it. No new Slack scopes or database migration are needed. Disable `SLACK_PREVIEW_ENABLED` and its mapping to roll back optional titles while preserving canonical P0 output.
+
 ## Slack setup and Phase 4 rollout
 
 First deploy with Claude/Web credentials, then import the generated manifest, configure Slack credentials/identity mappings, and redeploy. Set `PUBLIC_APP_URL` from Terraform `application_url` when needed. There is one Slack baseline without capability flags; source permalinks require a configured public URL. Reimport/reinstall the manifest after changed scopes/events. Socket Mode stays disabled. See [Slack setup](slack-setup.md).
@@ -28,7 +36,7 @@ This Phase 4 change removes Slack configuration entries and installed interactio
 
 ## Recovery
 
-Inspect Slack ingress → agent-input → anthropic-webhook → slack-projector, with cma-controller/scheduler/push and a2a-event-sink to locate intermediate boundaries. Web uses web-api → agui-bridge → controller/scheduler. Correlate event, thread and Task IDs, not user bodies/tool arguments. Inspect paired input/scheduler/push DLQs and the EventBridge DLQ before redrive; preserve logical IDs and diagnose the first broken boundary.
+Inspect Slack ingress → agent-input → anthropic-webhook → slack-projector, with cma-controller/scheduler/push and a2a-event-sink to locate intermediate boundaries. Web uses CloudFront → Node Web Function → private A2A controller/scheduler. Optional preview failures are separate metadata counters; canonical P0 remains authoritative. Correlate event, thread and Task IDs, not user bodies/tool arguments. Inspect paired input/scheduler/push DLQs and the EventBridge DLQ before redrive; preserve logical IDs and diagnose the first broken boundary.
 
 Private A2A uses the VPC endpoint; Terraform `private_a2a_url` is authoritative and must reject external callers. A2A subscription closure is not completion: read canonical `GetTask` history and reconcile stable message IDs. Slack finalization uses short current-Task projection, independent of subscriptions/preview.
 

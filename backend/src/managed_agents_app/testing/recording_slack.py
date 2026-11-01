@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from copy import deepcopy
 from threading import RLock
 from typing import Any, cast
@@ -43,7 +44,7 @@ class RecordingSlack(SlackClient):
             result: dict[str, Any] = {"ok": True}
             if operation in {"chat.postMessage", "chat.startStream"}:
                 self.counter += 1
-                ts = f"1000.{self.counter:06d}"
+                ts = f"{int(time.time())}.{self.counter:06d}"
                 message = {**deepcopy(payload), "ts": ts, "text": payload.get("text", "")}
                 self.messages[ts] = message
                 if operation == "chat.startStream":
@@ -94,6 +95,10 @@ class RecordingSlack(SlackClient):
             if stream["mode"] != "chunks":
                 raise ValueError("Cannot mix text and chunk stream modes")
             stream["chunks"].extend(deepcopy(payload["chunks"]))
+            for chunk in payload["chunks"]:
+                if chunk["type"] == "task_update":
+                    cards = stream.setdefault("tasks", {})
+                    cards.setdefault(chunk["id"], {}).update(deepcopy(chunk))
             stream["text"] += "".join(
                 c.get("text", "") for c in payload["chunks"] if c["type"] == "markdown_text"
             )
