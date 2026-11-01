@@ -37,11 +37,12 @@ cookie secret; changing those is not part of this upgrade.
 
 ## Web rollout checkpoints
 
-This commit is the **additive checkpoint**: it retains Python Web and its
-CloudFront route while adding the standalone IAM-protected TypeScript gateway,
-AppSync and the optional observer. Later public commits provide the CloudFront
-cutover and final retirement. Follow the complete final-release runbook before
-starting an existing-installation upgrade.
+This commit is the **CloudFront cutover checkpoint**. Its parent is the additive
+checkpoint, which retains the Python Web origin. This checkpoint routes `/api/*`
+to the IAM-protected TypeScript gateway and retains both Python Web Lambdas and
+their routes for rollback. Verify standalone connectivity before applying it,
+then verify authentication, history, review, clarification, Stop and Web/Slack
+continuity before proceeding to final retirement. Keep previews disabled.
 
 At each checkpoint, keep `PREVIEW_ENABLED=false`. Use
 `npm run deploy:plan -- --application-only` to save a target-account plan, review

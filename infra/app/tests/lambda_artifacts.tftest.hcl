@@ -129,3 +129,59 @@ run "human_review_permissions" {
     error_message = "Temporary review/input writes must stay controller-private and scoped to the pending prefix."
   }
 }
+
+run "web_function_network_and_trust_contract" {
+  command = plan
+  variables {
+    web_function_rollback_revision = "rev-reviewed-rollback"
+  }
+  assert {
+    condition = (
+      aws_subnet.web_private.availability_zone != aws_subnet.a2a_private.availability_zone &&
+      aws_route_table_association.web_private.route_table_id == aws_route_table.a2a_private.id &&
+      aws_route.a2a_private_default.nat_gateway_id == aws_nat_gateway.a2a.id &&
+      aws_vpc_endpoint.a2a_execute_api.private_dns_enabled &&
+      aws_vpc_security_group_egress_rule.a2a_callers_dsql.to_port == 5432 &&
+      aws_vpc_security_group_ingress_rule.a2a_endpoint_https.from_port == 443
+    )
+    error_message = "Both connector AZs must use the existing NAT route and private A2A/DSQL network boundary."
+  }
+  assert {
+    condition = (
+      strcontains(aws_cloudformation_stack.web_function.template_body, "ComputeTypes: [WebFunction]") &&
+      strcontains(aws_cloudformation_stack.web_function.template_body, "EgressNetworkConnectorArn: !GetAtt Connector.LatestVersionArn") &&
+      strcontains(aws_cloudformation_stack.web_function.template_body, "EndpointType: HomeRegion") &&
+      strcontains(aws_cloudformation_stack.web_function.template_body, "AuthType: IamAuth") &&
+      strcontains(aws_cloudformation_stack.web_function.template_body, "SigningBehavior: always-amz-auth") &&
+      strcontains(aws_cloudformation_stack.web_function.template_body, "SigningProtocol: sigv4") &&
+      strcontains(aws_cloudformation_stack.web_function.template_body, "UpdateReplacePolicy: Retain") &&
+      strcontains(aws_cloudformation_stack.web_function.template_body, "\"rev-reviewed-rollback\": 100") &&
+      strcontains(aws_cloudformation_stack.web_function_policy.template_body, "aws:SourceArn: !Ref DistributionArn")
+    )
+    error_message = "Web Function requires a version-qualified HomeRegion connector, IAM/OAC, and retained-revision rollback."
+  }
+  assert {
+    condition = alltrue([for behavior in aws_cloudfront_distribution.app.ordered_cache_behavior :
+      behavior.target_origin_id == (behavior.path_pattern == "api/*" ? "web-function" : "api-gateway") &&
+      behavior.cache_policy_id == data.aws_cloudfront_cache_policy.disabled.id &&
+      behavior.origin_request_policy_id == data.aws_cloudfront_origin_request_policy.all_except_host.id &&
+      !behavior.compress
+    ])
+    error_message = "Only /api/* moves; API cookies must survive, Host must not, and SSE must bypass caching/compression."
+  }
+  assert {
+    condition = (
+      !var.preview_enabled &&
+      aws_lambda_event_source_mapping.cma_preview.enabled == false &&
+      alltrue([for s in jsondecode(aws_iam_role_policy.web_function.policy).Statement :
+        !contains(s.Action, "appsync:EventPublish") && !contains(s.Action, "sqs:SendMessage")
+      ]) &&
+      alltrue([for s in jsondecode(aws_iam_role_policy.cma_preview.policy).Statement :
+        !contains(s.Action, "appsync:EventSubscribe") && !contains(s.Action, "dsql:DbConnect")
+      ]) &&
+      aws_appsync_api.preview.event_config[0].auth_provider[0].auth_type == "AWS_IAM" &&
+      aws_appsync_channel_namespace.preview.name == "preview"
+    )
+    error_message = "P1 is opt-in, with distinct publisher/subscriber roles, IAM-only channels and no observer DB writes."
+  }
+}
