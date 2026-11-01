@@ -16,7 +16,7 @@ from managed_agents_app.a2a_client.client import (
 )
 from managed_agents_app.cma_controller import push_handler
 from managed_agents_app.cma_controller.app import agent_card, create_app
-from managed_agents_app.cma_controller.push_trigger import AsyncLocalPushTrigger
+from managed_agents_app.cma_controller.push_trigger import AsyncLocalPushTrigger, SqsPushTrigger
 from managed_agents_app.domain import A2ATaskUpdated
 from managed_agents_app.testing.local_event_bus import LocalEventBus
 
@@ -76,6 +76,24 @@ def test_agent_card_does_not_advertise_unrunnable_push() -> None:
     assert all("async-copilot-controller" not in item.uri for item in card.capabilities.extensions)
 
 
+def test_push_retry_uses_sqs_delay_without_changing_wakeup_wire() -> None:
+    from unittest.mock import Mock
+
+    sqs = Mock()
+    trigger = SqsPushTrigger("queue", sqs)
+    trigger.schedule_context("context", "push-retry", 30)
+    request = sqs.send_message.call_args.kwargs
+    assert request["QueueUrl"] == "queue" and request["DelaySeconds"] == 30
+    assert json.loads(request["MessageBody"]) == {
+        "version": 1,
+        "contextId": "context",
+        "reason": "push-retry",
+    }
+    with pytest.raises(ValueError, match="Invalid push wakeup"):
+        trigger.schedule_context("context", "push-retry", 901)
+    sqs.send_message.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_async_local_push_worker_drains_and_survives_failure() -> None:
     trigger = AsyncLocalPushTrigger()
@@ -99,7 +117,7 @@ async def test_async_local_push_worker_drains_and_survives_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_push_handler_partial_batch_and_maintenance(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_push_handler_partial_batch_and_rejects_maintenance(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
     closed = 0
 
@@ -108,9 +126,6 @@ async def test_push_handler_partial_batch_and_maintenance(monkeypatch: pytest.Mo
             seen.append(context_id)
             if context_id == "bad":
                 raise RuntimeError("injected worker failure")
-
-        async def maintenance(self) -> int:
-            return 3
 
     class Composition:
         push_dispatcher = Dispatcher()
@@ -139,5 +154,152 @@ async def test_push_handler_partial_batch_and_maintenance(monkeypatch: pytest.Mo
     )
     assert result == {"batchItemFailures": [{"itemIdentifier": "2"}]}
     assert seen == ["good", "bad", "good"]
-    assert await push_handler._handle({"maintenance": "a2a-push"}) == {"scheduled": 3}
+    with pytest.raises(ValueError, match="Unknown push worker invocation"):
+        await push_handler._handle({"maintenance": "a2a-push"})
     assert closed == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["task", "message", "status_update", "artifact_update"])
+async def test_sink_relays_metadata_without_a2a_reads(monkeypatch, kind):
+    from unittest.mock import AsyncMock, Mock
+
+    from a2a.types import a2a_pb2 as a2a
+    from google.protobuf.json_format import MessageToJson
+
+    from managed_agents_app.a2a_client.client import A2AControllerClient
+    from managed_agents_app.a2a_event_sink.app import create_app as create_sink
+    from managed_agents_app.agents.registry import AgentRegistration, AgentRegistry
+    from managed_agents_app.db.thread_repository import ThreadRepository
+
+    get_task = AsyncMock(side_effect=AssertionError("The receiver must not read A2A history"))
+    monkeypatch.setattr(A2AControllerClient, "get_task", get_task)
+    threads = Mock(spec=ThreadRepository)
+    threads.get_task_binding.return_value = {"thread_id": "thread"}
+    threads.get_thread.return_value = {"thread_id": "thread", "agent_id": "cma", "context_id": "context"}
+    registry = AgentRegistry([AgentRegistration("cma", "http://controller.test")])
+    bus = LocalEventBus()
+    envelope = a2a.StreamResponse()
+    payload = getattr(envelope, kind)
+    if kind == "task":
+        payload.id = "task"
+        payload.status.state = a2a.TaskState.TASK_STATE_COMPLETED
+        payload.history.add(message_id="private-message", parts=[a2a.Part(text="private transcript")])
+    else:
+        payload.task_id = "task"
+        if kind == "status_update":
+            payload.status.state = a2a.TaskState.TASK_STATE_WORKING
+        elif kind == "message":
+            payload.parts.add(text="private transcript")
+        else:
+            payload.artifact.parts.add(text="private tool output")
+    payload.context_id = "context"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_sink(threads, registry, bus)), base_url="http://sink"
+    ) as http:
+        for _ in range(2):
+            response = await http.post(
+                "/internal/a2a/events/cma",
+                content=MessageToJson(envelope),
+                headers={"Content-Type": "application/a2a+json"},
+            )
+            assert response.status_code == 200
+    events = bus.snapshot()["pending"]
+    assert len(events) == 2
+    assert events[0]["detail"] == events[1]["detail"]
+    detail = events[0]["detail"]
+    assert detail["taskId"] == "task" and detail["threadId"] == "thread"
+    assert "private" not in json.dumps(detail)
+    assert set(detail) == {
+        "version",
+        "deliveryId",
+        "agentId",
+        "taskId",
+        "threadId",
+        "contextId",
+        "eventKind",
+    } | ({"taskState"} if kind in {"task", "status_update"} else set())
+    get_task.assert_not_called()
+    assert {call[0] for call in threads.mock_calls} == {"get_task_binding", "get_thread"}
+
+
+@pytest.mark.asyncio
+async def test_sink_rejects_invalid_callbacks_and_failed_eventbridge_publication(monkeypatch):
+    from unittest.mock import Mock
+
+    from managed_agents_app import events
+    from managed_agents_app.a2a_event_sink.app import create_app as create_sink
+    from managed_agents_app.agents.registry import AgentRegistration, AgentRegistry
+    from managed_agents_app.db.thread_repository import ThreadRepository
+
+    threads = Mock(spec=ThreadRepository)
+    threads.get_task_binding.return_value = {"thread_id": "thread"}
+    threads.get_thread.return_value = {"thread_id": "thread", "agent_id": "cma", "context_id": "context"}
+    publisher = Mock()
+    publisher.put_events.side_effect = [{"FailedEntryCount": 1}, {"FailedEntryCount": 0}]
+    monkeypatch.setattr(events, "_client", lambda: publisher)
+    sink = create_sink(
+        threads,
+        AgentRegistry([AgentRegistration("cma", "http://controller")]),
+        events.EventBridgeEventBus("bus"),
+    )
+    valid = {"task": {"id": "task", "contextId": "context"}}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=sink), base_url="http://sink") as http:
+        path = "/internal/a2a/events/cma"
+        assert (await http.post(path, json=valid)).status_code == 415
+        http.headers["Content-Type"] = "application/a2a+json"
+        for body in (
+            b"not-json",
+            b"\xff",
+            b"{}",
+            b'{"task": {"id": "task"}}',
+            b'{"task": {}, "message": {}}',
+        ):
+            assert (await http.post(path, content=body)).status_code == 400
+        assert (
+            await http.post(path, json=valid, headers={"X-A2A-Delivery-Id": "not-a-credential"})
+        ).status_code == 400
+        assert (await http.post("/internal/a2a/events/unknown", json=valid)).status_code == 400
+        assert (await http.post(path, json={"task": {"id": "task", "contextId": "other"}})).status_code == 409
+
+        async def oversized():
+            yield b" " * (1024 * 1024)
+            yield b" "
+
+        assert (await http.post(path, content=oversized())).status_code == 413
+        threads.get_task_binding.return_value = None
+        assert (await http.post(path, json=valid)).status_code == 503
+        threads.get_task_binding.return_value = {"thread_id": "thread"}
+        threads.get_thread.return_value["agent_id"] = "other"
+        assert (await http.post(path, json=valid)).status_code == 409
+        threads.get_thread.return_value["agent_id"] = "cma"
+        publisher.put_events.assert_not_called()
+        assert (await http.post(path, json=valid)).status_code == 503
+        assert (await http.post(path, json=valid)).status_code == 200
+        assert publisher.put_events.call_count == 2
+        assert "taskState" not in json.loads(publisher.put_events.call_args.kwargs["Entries"][0]["Detail"])
+
+
+@pytest.mark.asyncio
+async def test_local_push_keeps_a_wakeup_arriving_during_dispatch():
+    trigger = AsyncLocalPushTrigger()
+    completed = asyncio.Event()
+    calls = 0
+
+    class Dispatcher:
+        async def run_context(self, context_id):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                trigger.schedule_context(context_id, "changed-during-post")
+                await asyncio.sleep(0)
+            else:
+                completed.set()
+
+    trigger.start(Dispatcher())
+    try:
+        trigger.schedule_context("context", "first")
+        await asyncio.wait_for(completed.wait(), 1)
+        assert calls == 2
+    finally:
+        await trigger.stop()

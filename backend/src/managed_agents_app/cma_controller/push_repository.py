@@ -55,14 +55,13 @@ class PushRepository:
             )
             return list(cur.fetchall())
 
-    def reset_permanent_failure(self, task_id: str, config_id: str) -> bool:
+    def reset_delivery(self, task_id: str, config_id: str) -> bool:
         with connect(self.runtime.config, self.runtime.role) as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE cma_push_configs SET permanent_failure_at = NULL, attempt_count = 0, "
                 "next_attempt_at = NULL, delivery_claim_id = NULL, delivery_lease_expires_at = NULL, "
                 "updated_at = CURRENT_TIMESTAMP "
                 "WHERE task_id = %s AND config_id = %s AND deleted_at IS NULL "
-                "AND permanent_failure_at IS NOT NULL "
                 "AND (delivery_claim_id IS NULL OR delivery_lease_expires_at <= CURRENT_TIMESTAMP) "
                 "RETURNING task_id",
                 (task_id, config_id),
@@ -87,42 +86,10 @@ class PushRepository:
             )
             return cur.fetchone() is not None
 
-    def deletion_settled(self, task_id: str, config_id: str) -> bool:
-        with connect(self.runtime.config, self.runtime.role) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT delivery_claim_id, delivery_lease_expires_at <= CURRENT_TIMESTAMP AS expired "
-                "FROM cma_push_configs "
-                "WHERE task_id = %s AND config_id = %s",
-                (task_id, config_id),
-            )
-            row = cur.fetchone()
-            return row is None or row["delivery_claim_id"] is None or bool(row["expired"])
-
-    def purge_deleted(self, task_id: str, config_id: str) -> None:
-        with connect(self.runtime.config, self.runtime.role) as conn, conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM cma_push_configs WHERE task_id = %s AND config_id = %s "
-                "AND deleted_at IS NOT NULL AND "
-                "(delivery_claim_id IS NULL OR delivery_lease_expires_at <= CURRENT_TIMESTAMP)",
-                (task_id, config_id),
-            )
-
-    def contexts_for_maintenance(self, after_context_id: str = "", limit: int = 500) -> list[str]:
-        with connect(self.runtime.config, self.runtime.role) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT DISTINCT t.context_id FROM cma_push_configs p "
-                "JOIN cma_tasks t ON t.task_id = p.task_id "
-                "WHERE p.deleted_at IS NULL AND p.permanent_failure_at IS NULL "
-                "AND t.context_id > %s "
-                "ORDER BY t.context_id LIMIT %s",
-                (after_context_id, limit),
-            )
-            return [str(row["context_id"]) for row in cur.fetchall()]
-
     def list_context(self, context_id: str) -> list[dict[str, Any]]:
         with connect(self.runtime.config, self.runtime.role) as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT p.* FROM cma_push_configs p JOIN cma_tasks t ON t.task_id = p.task_id "
+                "SELECT p.*, t.a2a_state FROM cma_push_configs p JOIN cma_tasks t ON t.task_id = p.task_id "
                 "WHERE t.context_id = %s AND p.deleted_at IS NULL AND p.permanent_failure_at IS NULL "
                 "ORDER BY p.task_id, p.config_id",
                 (context_id,),

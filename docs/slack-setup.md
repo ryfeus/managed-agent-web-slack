@@ -1,132 +1,49 @@
 # Slack setup
 
-Use a Slack Developer Program sandbox for acceptance testing. It supports the Slack agent capabilities used here without requiring a paid production workspace.
+Use signed HTTP Events API delivery with Socket Mode disabled. Bot token and signing secret belong in untracked `.env`/Secrets Manager; workspace/user/channel IDs are routing data, not credentials. App-level Socket Mode tokens are unused.
 
-## Information required from the Slack sandbox
+## Manifest and installed scopes
 
-- Rotated bot token (`xoxb-…`) and signing secret, stored only in `.env`/Secrets Manager.
-- Workspace/team ID for the sandbox.
-- Human test-member ID.
-- One public and one private test-channel ID.
+After deployment run `npm run slack:manifest`, import `.generated/slack-manifest.yaml`, and reinstall the app after scope/event changes. The renderer can also accept `--public-app-url https://example.cloudfront.net`. Terraform `slack_events_url` and `slack_interactions_url` are authoritative. Invite the bot to the selected channels.
 
-Team, member, and channel IDs are routing/acceptance configuration, not authentication credentials. The app-level token is not used because Socket Mode remains disabled. Rotate any Slack bot token, app token, signing secret, or client secret previously exposed during inspection.
+For API administration, keep `SLACK_APP_CONFIGURATION_TOKEN` and `SLACK_REFRESH_TOKEN` in local `.env`; they are not deployed credentials. Export the existing manifest, validate the complete proposed configuration, apply it, and export again to verify. [Manifest updates replace the configuration](https://docs.slack.dev/reference/methods/apps.manifest.update/), so preserve existing user OAuth/MCP settings outside the bot change. An existing org-ready app must retain `org_deploy_enabled: true`; Slack rejects disabling it even though the fresh-app template defaults to false.
 
-## Install the manifest
+Inspect `permissions_updated` and the installed token's `x-oauth-scopes` separately. Removing scopes from the manifest does not remove grants from an existing token; [Slack retains those grants until token revocation or app uninstallation](https://docs.slack.dev/app-management/distribution/). Credential replacement requires its own installation/revocation and secret-sync procedure; a successful manifest update alone does not establish reduced token privileges.
 
-1. Run `npm run slack:manifest` after deployment, or pass
-   `--public-app-url https://example.cloudfront.net` to the renderer.
-2. Import the generated `.generated/slack-manifest.yaml` in the sandbox app.
-3. Keep Socket Mode disabled.
-4. Confirm the Events API URL is the Terraform `slack_events_url` output.
-5. Confirm the interactivity URL is `slack_interactions_url`.
-6. Confirm the rendered deployment host is an unfurl domain.
-7. Install or reinstall the app after every scope/event/feature change.
-8. Invite the app to both acceptance channels.
-
-The manifest requests:
-
-| Scope | Why it is required |
+| Scope | Purpose |
 | --- | --- |
-| `assistant:write` | Agent View session status, lifecycle, and native agent UI |
-| `chat:write` | Replies and streamed responses |
+| `assistant:write` | Agent View status/lifecycle |
+| `chat:write` | Replies, task cards and approval messages |
 | `app_mentions:read` | Top-level channel prompts |
-| `im:history` | Agent View/DM continuity and shortcut context |
-| `channels:history` | Public-channel bound replies and shortcut context |
-| `groups:history` | Private-channel bound replies and shortcut context |
-| `commands` | Message shortcuts and interactive controls |
-| `links:read` | Receive authorized thread-link shares |
-| `links:write` | Render thread unfurls |
-| `reactions:write` | Add the optional idempotent receipt reaction to the triggering message |
+| `im:history` | DM/Agent View messages |
+| `channels:history`, `groups:history` | Owned bound-thread replies in public/private channels |
+| `reactions:write` | Receipt reaction on the exact triggering message |
 
-Subscribed events are `app_mention`, `message.im`, `message.channels`, `message.groups`, `app_home_opened`, `app_context_changed`, `agent_session_stopped`, and `link_shared`. App-home/context events that need no durable action are acknowledged and ignored; no channel mirror is built.
+Events are `app_mention`, `message.im`, `message.channels`, `message.groups`, and `agent_session_stopped`. Signed interactivity handles native OpenAPPA Allow/Deny. Phase 4 removes shortcuts, feedback, active-view context injection, unfurls and their `commands`/`links:read`/`links:write` scopes. Existing installations must import/reinstall; text in the manifest does not prove the token has the required permissions. A successful `reactions.add` is the receipt-scope acceptance check.
 
-## Identity and authorization
+## One conversation and authorization
 
-1. The signing secret authenticates each unmodified HTTP request body and enforces Slack's replay window.
-2. The verified payload supplies `team_id` and the acting human `user_id`.
-3. Agent Input resolves `(provider='slack', team_id, user_id)` through DSQL.
-4. Every protected stop, approval, feedback, shortcut, link, and unfurl rechecks identity and thread ownership.
+HMAC verifies the raw body/timestamp before normalization. The signed team/human identity resolves through DSQL, and every reply, link, review or Stop verifies thread ownership. Only mentions start channel conversations; plain channel messages must reply to an existing binding. DMs can start their own thread. Use `@bot link <application thread UUID>` to link an owned Web conversation explicitly. Sharing a URL does not invoke an unfurl workflow.
 
-Map the test human after DSQL migration:
+Processing status, exact-message receipts, chunk task cards, canonical final responses and Stop are enabled as one baseline. Source permalinks are included when `PUBLIC_APP_URL` is configured. Failed card startup falls back to a normal final reply. An OpenAPPA-required review shows exact tool/arguments and policy explanation with Allow/Deny; it records a ruling for native resolution, never a direct CMA approval. Clarification is shown as text and answered in authenticated Web. There are no capability flags.
 
 ```bash
 export DSQL_ENDPOINT="$(terraform -chdir=infra/app output -raw dsql_endpoint)"
 npm run db:map-slack -- --team-id T01234567 --user-id U01234567
 ```
 
-`SLACK_TEAM_ID` and `SLACK_USER_ID` can temporarily narrow development traffic and let `db:seed` create one mapping. They are optional, do not prove identity, and should normally be unset after sandbox setup.
+Run with concrete AWS credentials and `AWS_REGION=us-west-2`. Optional `SLACK_TEAM_ID`/`SLACK_USER_ID` narrow development traffic but never authorize it; normally leave them unset.
 
-## Local real Slack user smoke
+## Optional draft titles
 
-Create a sandbox user OAuth token for the human test member and keep it only in
-the ignored local `.env` as `SLACK_USER_TOKEN`. For a public test channel it
-needs `chat:write` and `channels:history`; for a private channel it needs
-`chat:write` and `groups:history`. No channel-discovery scope is required.
-The user and deployed bot must be members of the selected channel. Leave Socket
-Mode disabled so Slack delivers genuine Events API requests to AWS.
+Phase 6 adds optional rolling `Draft: …` task-card titles with `SLACK_PREVIEW_ENABLED=true` and `PREVIEW_ENABLED=true`. Both default false. No new OAuth scope is needed: title updates use the existing `chat:write` grant. This is a short provisional excerpt; canonical Markdown is authoritative and P0 replaces the title at completion, Stop, failure or human input. No preview is started without a P0-created stream, and review does not reopen a closed card. See [rollout and remaining acceptance](phase-6-rollout.md).
 
-Run `python ../scripts/slack_user.py whoami` through the backend environment to
-confirm the token's team and human user ID. Map that returned identity using
-`npm run db:map-slack` as shown above. Set `E2E_LIVE_SLACK_CHANNEL_ID` in `.env`
-to the sandbox channel ID and optionally set `E2E_LIVE_SLACK_TEAM_ID` as a
-workspace assertion. Deploy with `SLACK_BOUND_THREAD_REPLIES=true` so the
-unmentioned second turn is accepted.
+## API-only sandbox testing
 
-Slack may mark messages posted with a user OAuth token as app-originated and
-include `bot_id` and `app_id`. Set `SLACK_USER_BOT_ID` and `SLACK_USER_APP_ID` in
-the local `.env` to that sender's exact IDs, then redeploy. These identifiers
-are passed only to the Slack ingress Lambda. Ingress accepts that exact pair for
-mentions and bound replies, including its `bot_message` subtype; it still
-rejects other bot messages and other subtypes. The message's human `user` must
-still map to an application principal. Leave both IDs unset to disable the
-exception. Never deploy `SLACK_USER_TOKEN`.
+Configure local `SLACK_USER_TOKEN`, `SLACK_BOT_TOKEN`, `E2E_LIVE_SLACK_CHANNEL_ID`, Web credentials and AWS/DSQL access. User token scopes need `chat:write` and the channel's history scope; both users/bot must access the channel. `RUN_LIVE_E2E=1 npm run test:live -- all` validates account, configuration, scopes, identity ownership and channel access before genuine delivery. It does not deploy, provision, remap or log in. The user token stays local and is never synced to Secrets Manager or Lambda.
 
-For backend inspection, export the Terraform DSQL endpoint and valid concrete
-AWS credentials in the shell running the smoke:
+Slack may attach bot/app metadata to a user-token post. If so, configure the exact `SLACK_USER_BOT_ID` plus `SLACK_USER_APP_ID` pair and deploy it to ingress. Both must match; the human still needs its DSQL mapping. Leaving them unset disables this narrow exception.
 
-```bash
-export DSQL_ENDPOINT="$(terraform -chdir=infra/app output -raw dsql_endpoint)"
-UV_CACHE_DIR=.uv-cache uv run --directory backend python ../scripts/slack_user.py whoami
-npm run e2e:slack-user
-```
+All agent-run Slack testing uses CLI/API helpers. Never ask the user to open Slack, log in, send messages, click buttons or inspect the UI. Missing/revoked credentials, scopes or channel access are reported directly with secret-safe diagnostics. Signed fixtures do not prove native clicks, modals or client rendering. The current live policy smoke checks automatic policy; new HITL live acceptance requires its own explicitly authorized policy rollout. See [testing](testing.md).
 
-The smoke keeps its Slack thread as evidence. The user token is never synced to
-Secrets Manager, placed in Terraform, or passed to Lambda.
-
-## Feature gates
-
-All new capabilities default off so deployment can establish Python parity first:
-
-```text
-SLACK_BOUND_THREAD_REPLIES
-SLACK_AGENT_VIEW_ENABLED
-SLACK_STREAMING_ENABLED
-SLACK_TOOL_APPROVALS_ENABLED
-SLACK_FEEDBACK_ENABLED
-SLACK_SHORTCUTS_ENABLED
-SLACK_ACTIVE_CONTEXT_ENABLED
-SLACK_UNFURLS_ENABLED
-SLACK_RECEIPT_REACTION_ENABLED
-SLACK_RECEIPT_REACTION
-SLACK_SOURCE_LINKS_ENABLED
-SLACK_TASK_CARDS_ENABLED
-```
-
-Set boolean gates to `true` individually in `.env` and redeploy. `SLACK_RECEIPT_REACTION` is a Slack reaction name without colons and defaults to `eyes`. Task cards require streaming; when task cards are enabled without streaming, they are disabled at runtime with a warning. `PUBLIC_APP_URL` should be the CloudFront origin without a trailing slash; the deployment wrapper can recover the existing Terraform output when it is omitted.
-
-After adding `reactions:write` to the manifest, reinstall the app before enabling receipt reactions. Otherwise Slack returns `missing_scope` and EventBridge retries the isolated working-state projection.
-
-## Expected behavior
-
-- A top-level channel prompt must mention the app.
-- A plain reply is accepted only in an already-bound thread.
-- A top-level DM creates an application thread; later DM replies reuse it.
-- Accepted requests immediately enter `processing` and can receive `:eyes:` on the exact message.
-- Responses can appear as timeline task cards linked to the original Slack message.
-- A task completes only after a final response with no pending approval; approvals leave it in progress and set Slack status to `suspended`.
-- Slack stop cancels the authorized A2A Task; the controller handles any provider interrupt.
-- Pending tools render Allow/Deny actions; denial with a reason opens a modal.
-- Feedback stores identifiers/rating only, never response text.
-- Shortcuts fetch current authorized Slack context at execution time and do not persist it.
-- Sharing `https://<cloudfront>/?thread=<uuid>` unfurls only when the sharing identity owns the application thread.
-- `link <thread-uuid>` binds a Slack conversation to an existing authorized application thread.
+Troubleshoot no ingress by checking Socket Mode and request/event configuration; ignored ingress by metadata/identity/ownership; missing output by scheduler/push/projection receipts and Slack API errors. Never log message bodies or credentials. Reference: [Slack request signing](https://api.slack.com/docs/verifying-requests-from-slack), [streaming API](https://docs.slack.dev/reference/methods/chat.startStream/).

@@ -8,13 +8,13 @@ export default defineConfig({
     retries: 0,
     timeout: 45000,
     expect: { timeout: 15000 },
-    outputDir: 'test-results/production-web-playwright',
+    outputDir: process.env.E2E_ARTIFACT_DIR ? `${process.env.E2E_ARTIFACT_DIR}/playwright` : 'test-results/production-web-playwright',
     reporter: [
         ['list'],
-        ['html', { open: 'never', outputFolder: 'playwright-report-production' }],
+        ['html', { open: 'never', outputFolder: process.env.E2E_ARTIFACT_DIR ? `${process.env.E2E_ARTIFACT_DIR}/report` : 'playwright-report-production' }],
     ],
     use: {
-        baseURL: 'http://127.0.0.1:3000',
+        baseURL: process.env.E2E_BASE_URL || 'http://127.0.0.1:3000',
         browserName: 'chromium',
         trace: 'retain-on-failure',
         screenshot: 'only-on-failure',

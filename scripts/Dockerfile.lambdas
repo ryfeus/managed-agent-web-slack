@@ -1,0 +1,77 @@
+# Use the bundled BuildKit frontend; builds need only the digest-resolved base images.
+ARG RUST_BUILD_IMAGE
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS dependencies
+ARG TARGETARCH
+ARG DEPENDENCY_CACHE_KEY
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+WORKDIR /build
+COPY requirements.txt ./requirements.txt
+RUN --mount=type=cache,id=lambda-${DEPENDENCY_CACHE_KEY}-${TARGETARCH},target=/root/.cache/pip \
+    python -m pip install --quiet --no-compile --require-hashes -r requirements.txt -t /output/python-package
+
+FROM ${RUST_BUILD_IMAGE} AS policy
+ARG TARGETARCH
+RUN apk add --no-cache musl-dev gcc git
+WORKDIR /build/openappa
+COPY openappa/Cargo.toml openappa/Cargo.lock ./
+COPY openappa/src ./src
+COPY openappa/tests ./tests
+RUN --mount=type=cache,id=openappa-target-${TARGETARCH},target=/build/openappa/target \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo build --locked --release && cargo test --locked --release && \
+    cp target/release/openappa-cma /build/openappa-cma
+
+FROM dependencies AS application
+COPY --from=policy /build/openappa-cma /build/openappa-cma
+COPY openappa/tests /build/policy-fixtures
+COPY managed_agents_app /build/managed_agents_app
+COPY launchers /build/launchers
+RUN python - <<'PY'
+import json
+import shutil
+import subprocess
+from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
+# Verify the static helper on the actual Amazon Linux/Python build base too.
+def native(request):
+    result = subprocess.run(['/build/openappa-cma'], input=json.dumps(request),
+        capture_output=True, text=True, timeout=15, check=True)
+    response = json.loads(result.stdout)
+    assert response['version'] == 3
+    return response['result']
+
+request = {'version': 3,
+    'policy': Path('/build/policy-fixtures/baseline.toml').read_text(), 'request': {
+        'root_id': 'artifact-root', 'invocation_id': 'artifact-event', 'agent_id': 'artifact',
+        'tool_kind': 'builtin', 'tool_name': 'web_fetch', 'arguments': {}, 'runtime': 'cma'}}
+for tool, decision in [('web_fetch', 'allow'), ('undeclared', 'deny'), ('web_search', 'allow')]:
+    request['request']['tool_name'] = tool
+    assert native(request)['decision'] == decision
+request['policy'] = Path('/build/policy-fixtures/human-review.toml').read_text()
+review = native(request)
+assert review['decision'] == 'human_review'
+for ruling, decision in [('approve', 'allow'), ('deny', 'deny')]:
+    request['resolve'] = {key: review['review'][key] for key in ('authority', 'fingerprint')}
+    request['resolve']['ruling'] = ruling
+    assert native(request)['decision'] == decision
+output = Path('/output')
+for name, launcher in [('python-buffered', None), ('cma-controller', 'run_cma_controller.sh'), ('a2a-event-sink', 'run_a2a_event_sink.sh')]:
+    target = output / 'lambdas' / name
+    shutil.copytree(output / 'python-package', target)
+    shutil.copytree('/build/managed_agents_app', target / 'managed_agents_app')
+    if name == 'python-buffered':
+        shutil.copy('/build/openappa-cma', target / 'managed_agents_app/policy/openappa-cma')
+        (target / 'managed_agents_app/policy/openappa-cma').chmod(0o755)
+    if launcher:
+        shutil.copy('/build/launchers/' + launcher, target / 'run.sh')
+        (target / 'run.sh').chmod(0o755)
+    with ZipFile(target.with_suffix('.zip'), 'w', ZIP_DEFLATED) as archive:
+        for file in sorted(target.rglob('*')):
+            if file.is_file():
+                archive.write(file, file.relative_to(target))
+PY
+
+FROM scratch AS artifacts
+COPY --from=application /output/ /

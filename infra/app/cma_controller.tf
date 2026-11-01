@@ -80,25 +80,6 @@ resource "aws_lambda_event_source_mapping" "cma_push" {
   function_response_types = ["ReportBatchItemFailures"]
 }
 
-resource "aws_cloudwatch_event_rule" "cma_push_maintenance" {
-  name                = "${local.name}-cma-push-maintenance"
-  schedule_expression = "rate(1 minute)"
-}
-
-resource "aws_cloudwatch_event_target" "cma_push_maintenance" {
-  rule  = aws_cloudwatch_event_rule.cma_push_maintenance.name
-  arn   = aws_lambda_function.app["cma-push"].arn
-  input = jsonencode({ maintenance = "a2a-push" })
-}
-
-resource "aws_lambda_permission" "cma_push_maintenance" {
-  statement_id  = "AllowCmaPushMaintenance"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.app["cma-push"].function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.cma_push_maintenance.arn
-}
-
 resource "aws_cloudwatch_metric_alarm" "cma_push_dlq" {
   alarm_name          = "${local.name}-cma-push-dlq-visible"
   namespace           = "AWS/SQS"
@@ -157,6 +138,7 @@ resource "aws_lambda_event_source_mapping" "cma_scheduler" {
 resource "aws_cloudwatch_event_rule" "cma_pending_input_gc" {
   name                = "${local.name}-cma-pending-input-gc"
   schedule_expression = "rate(1 day)"
+  state               = "DISABLED"
 }
 
 resource "aws_cloudwatch_event_target" "cma_pending_input_gc" {

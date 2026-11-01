@@ -54,11 +54,25 @@ resource "aws_cloudfront_distribution" "app" {
     compress               = true
   }
 
+  origin {
+    domain_name              = aws_cloudformation_stack.web_function.outputs["EndpointDomain"]
+    origin_id                = "web-function"
+    origin_access_control_id = aws_cloudformation_stack.web_function.outputs["OacId"]
+    connection_attempts      = 1
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+      origin_read_timeout    = 60
+    }
+  }
+
   dynamic "ordered_cache_behavior" {
     for_each = toset(["api/*", "slack/*", "anthropic/*"])
     content {
       path_pattern             = ordered_cache_behavior.value
-      target_origin_id         = "api-gateway"
+      target_origin_id         = ordered_cache_behavior.value == "api/*" ? "web-function" : "api-gateway"
       viewer_protocol_policy   = "https-only"
       allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
       cached_methods           = ["GET", "HEAD", "OPTIONS"]

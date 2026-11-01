@@ -12,14 +12,14 @@ warn_cma_lock_changes() {
 trap warn_cma_lock_changes EXIT
 
 plan_only=false
-if [[ $# -gt 0 ]]; then
-  if [[ "$1" == "--plan-only" && $# -eq 1 ]]; then
-    plan_only=true
-  else
-    echo "Usage: ./scripts/deploy.sh [--plan-only]" >&2
-    exit 2
-  fi
-fi
+application_only=false
+for option in "$@"; do
+  case "$option" in
+    --plan-only) plan_only=true ;;
+    --application-only) application_only=true ;;
+    *) echo "Usage: ./scripts/deploy.sh [--plan-only] [--application-only]" >&2; exit 2 ;;
+  esac
+done
 
 if [[ ! -f .env ]]; then
   echo "Missing .env; copy .env.example and configure a real deployment first." >&2
@@ -47,9 +47,11 @@ require_value() {
 }
 
 validate_deployment_configuration() {
-  require_value "ANTHROPIC_API_KEY" "${ANTHROPIC_API_KEY:-}"
-  require_value "WEB_ACCESS_TOKEN" "${WEB_ACCESS_TOKEN:-}"
-  require_value "WEB_COOKIE_SECRET" "${WEB_COOKIE_SECRET:-}"
+  if [[ "$application_only" == false ]]; then
+    require_value "ANTHROPIC_API_KEY" "${ANTHROPIC_API_KEY:-}"
+    require_value "WEB_ACCESS_TOKEN" "${WEB_ACCESS_TOKEN:-}"
+    require_value "WEB_COOKIE_SECRET" "${WEB_COOKIE_SECRET:-}"
+  fi
   if [[ -n "${SLACK_USER_BOT_ID:-}" && -z "${SLACK_USER_APP_ID:-}" ]] || \
      [[ -z "${SLACK_USER_BOT_ID:-}" && -n "${SLACK_USER_APP_ID:-}" ]]; then
     echo "SLACK_USER_BOT_ID and SLACK_USER_APP_ID must be configured together." >&2
@@ -112,6 +114,9 @@ initialize_application_terraform() {
 configure_terraform_inputs() {
   local existing_url
   existing_url="$(terraform -chdir=infra/app output -raw application_url 2>/dev/null || true)"
+  export TF_VAR_preview_enabled="${PREVIEW_ENABLED:-false}"
+  export TF_VAR_slack_preview_enabled="${SLACK_PREVIEW_ENABLED:-false}"
+  export TF_VAR_openappa_timeout_seconds="${OPENAPPA_TIMEOUT_SECONDS:-10}"
   export TF_VAR_app_name="$app_name_value"
   export TF_VAR_environment="$environment_value"
   export TF_VAR_aws_region="$aws_region_value"
@@ -123,27 +128,25 @@ configure_terraform_inputs() {
   export TF_VAR_slack_user_bot_id="${SLACK_USER_BOT_ID:-}"
   export TF_VAR_slack_user_app_id="${SLACK_USER_APP_ID:-}"
   export TF_VAR_public_app_url="${PUBLIC_APP_URL:-$existing_url}"
-  export TF_VAR_slack_bound_thread_replies_enabled="${SLACK_BOUND_THREAD_REPLIES:-false}"
-  export TF_VAR_slack_agent_view_enabled="${SLACK_AGENT_VIEW_ENABLED:-false}"
-  export TF_VAR_slack_streaming_enabled="${SLACK_STREAMING_ENABLED:-false}"
-  export TF_VAR_slack_approvals_enabled="${SLACK_TOOL_APPROVALS_ENABLED:-false}"
-  export TF_VAR_slack_feedback_enabled="${SLACK_FEEDBACK_ENABLED:-false}"
-  export TF_VAR_slack_shortcuts_enabled="${SLACK_SHORTCUTS_ENABLED:-false}"
-  export TF_VAR_slack_active_context_enabled="${SLACK_ACTIVE_CONTEXT_ENABLED:-false}"
-  export TF_VAR_slack_unfurls_enabled="${SLACK_UNFURLS_ENABLED:-false}"
-  export TF_VAR_slack_receipt_reaction_enabled="${SLACK_RECEIPT_REACTION_ENABLED:-false}"
   export TF_VAR_slack_receipt_reaction="${SLACK_RECEIPT_REACTION:-eyes}"
-  export TF_VAR_slack_source_links_enabled="${SLACK_SOURCE_LINKS_ENABLED:-false}"
-  export TF_VAR_slack_task_cards_enabled="${SLACK_TASK_CARDS_ENABLED:-false}"
+}
+
+run_local_build() {
+  # Deployment credentials and dotenv values must not enter local tests/builds.
+  local clean_env=(env -i "PATH=$PATH" "HOME=$HOME" "PYTHONDONTWRITEBYTECODE=1" "UV_CACHE_DIR=$PWD/.uv-cache")
+  local name value
+  for name in USER TMPDIR LANG LC_ALL DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG PLAYWRIGHT_BROWSERS_PATH; do
+    value="${!name:-}"
+    if [[ -n "$value" ]]; then clean_env+=("$name=$value"); fi
+  done
+  "${clean_env[@]}" "$@"
 }
 
 build_and_plan() {
-  npm run lint
-  npm run typecheck
-  npm run test:web
-  UV_CACHE_DIR=.uv-cache uv run --directory backend pytest --ignore=tests/integration
-  npm run build:web
-  ./scripts/build_python_lambdas.sh
+  run_local_build npm run check
+  run_local_build npm run build:web
+  run_local_build ./scripts/build_python_lambdas.sh
+  run_local_build npm run build:functions
 
   mkdir -p dist
   terraform -chdir=infra/app plan -out=../../dist/application.tfplan
@@ -164,15 +167,23 @@ deploy_application() {
   build_and_plan
   terraform -chdir=infra/app apply -auto-approve ../../dist/application.tfplan
 
-  npm run secrets:sync
-  export DSQL_ENDPOINT="$(terraform -chdir=infra/app output -raw dsql_endpoint)"
-  export DSQL_RUNTIME_ROLE_ARNS="$(terraform -chdir=infra/app output -json dsql_runtime_role_arns | jq -r 'join(",")')"
-  npm run db:migrate
-  npm run db:seed
+  if [[ "$application_only" == false ]]; then
+    npm run secrets:sync
+    export DSQL_ENDPOINT="$(terraform -chdir=infra/app output -raw dsql_endpoint)"
+    export DSQL_RUNTIME_ROLE_ARNS="$(terraform -chdir=infra/app output -json dsql_runtime_role_arns | jq -r 'join(",")')"
+    npm run db:migrate
+    npm run db:seed
+  else
+    echo "Application-only deployment: CMA, credential synchronization and database migration/seed were not run."
+    echo "Authorize DSQL role binding for any new runtime role separately before cutover."
+  fi
 
   local web_bucket distribution_id
   web_bucket="$(terraform -chdir=infra/app output -raw web_bucket_name)"
   distribution_id="$(terraform -chdir=infra/app output -raw cloudfront_distribution_id)"
+  # An older immutable build can have equal-size HTML and an earlier mtime.
+  # Upload its exact contents before pruning; sync alone can retain stale HTML.
+  aws s3 cp apps/web/out "s3://$web_bucket" --recursive
   aws s3 sync apps/web/out "s3://$web_bucket" --delete
   aws cloudfront create-invalidation --distribution-id "$distribution_id" --paths '/*' >/dev/null
   python3 scripts/render_slack_manifest.py
@@ -190,8 +201,8 @@ else
 fi
 eval "$(aws configure export-credentials --profile "$aws_profile_value" --format env)"
 unset AWS_PROFILE AWS_DEFAULT_PROFILE
-if [[ "$plan_only" == true ]]; then
-  echo "CMA resources are not mutated in --plan-only mode. Run npm run cma:plan separately; AWS planning uses the current lock version."
+if [[ "$plan_only" == true || "$application_only" == true ]]; then
+  echo "CMA resources are not mutated in plan-only/application-only mode. Run npm run cma:plan separately; AWS planning uses the current lock version."
 else
   ./scripts/cma.sh apply
 fi

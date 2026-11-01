@@ -16,7 +16,6 @@ dependencies = [
   "slack-sdk>=3.43.0",
   "uvicorn>=0.37.0",
   "a2a-sdk[fastapi]==1.1.4",
-  "ag-ui-protocol==1.0.0",
 ]
 
 [dependency-groups]

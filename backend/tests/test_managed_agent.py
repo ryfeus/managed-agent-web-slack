@@ -76,17 +76,11 @@ def test_message_tool_confirmation_interrupt_and_title(config) -> None:
     assert len(raw.beta.sessions.update.call_args.kwargs["title"]) == 60
 
 
-def test_event_listing_and_streaming(config) -> None:
+def test_event_listing(config) -> None:
     raw = raw_client()
     raw.beta.sessions.events.list.return_value = [SimpleNamespace(model_dump=lambda **_: {"id": "evt_1"})]
-    raw.beta.sessions.events.stream.return_value = iter([{"type": "agent.message", "id": "evt_2"}])
     managed = ManagedAgentClient(config, raw)
     assert managed.list_events("sesn_1") == [{"id": "evt_1"}]
-    assert list(managed.stream_events("sesn_1", include_thinking=False)) == [
-        {"type": "agent.message", "id": "evt_2"}
-    ]
-    assert raw.beta.sessions.events.stream.call_args.kwargs["event_deltas"] == ["agent.message"]
-    assert raw.beta.sessions.events.stream.call_args.kwargs["timeout"] == 45.0
 
 
 def test_controller_session_metadata_and_full_event_iteration(config) -> None:

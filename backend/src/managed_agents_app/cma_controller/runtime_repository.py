@@ -114,6 +114,109 @@ class ControllerRuntimeRepository(CmaControllerRepository):
             cur.execute("SELECT * FROM cma_contexts WHERE cma_session_id = %s", (session_id,))
             return cur.fetchone()
 
+    def record_policy_decision(
+        self, context_id: str, task_id: str, claim_id: str, request_id: str, decision: str
+    ) -> None:
+        """Commit the authorization checkpoint before any provider side effect.
+
+        FOR UPDATE includes Task/cancellation and lease guards in DSQL OCC validation.
+        """
+        if decision not in {"allow", "deny"}:
+            raise ValueError("Unknown policy decision")
+
+        def operation() -> None:
+            with connect(self.config, self.role) as conn, conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE cma_input_requests SET decision = %s, status = 'resolving', "
+                    "updated_at = CURRENT_TIMESTAMP WHERE request_id = %s AND task_id = %s "
+                    "AND kind = 'tool_approval' AND status = 'pending' AND decision IS NULL "
+                    "AND confirmation_attempted_at IS NULL AND EXISTS "
+                    "(SELECT 1 FROM cma_tasks t JOIN cma_contexts c ON c.context_id = t.context_id "
+                    "WHERE t.task_id = cma_input_requests.task_id AND c.context_id = %s "
+                    "AND c.active_task_id = t.task_id AND t.internal_state <> 'terminal' "
+                    "AND t.cancel_requested_at IS NULL AND c.scheduler_claim_id = %s "
+                    "AND c.scheduler_lease_expires_at > CURRENT_TIMESTAMP FOR UPDATE OF t, c) "
+                    "RETURNING request_id",
+                    (decision, request_id, task_id, context_id, claim_id),
+                )
+                if cur.fetchone() is None:
+                    raise LostSchedulerClaim(context_id)
+
+        with_dsql_retry(operation)
+
+    def record_human_review(
+        self,
+        context_id: str,
+        task_id: str,
+        claim_id: str,
+        request_id: str,
+        digest: str | None,
+        authority: str | None,
+        object_key: str | None,
+    ) -> None:
+        """Rotate the surface ID on every new offer; an old button cannot grant new consent."""
+
+        def operation() -> None:
+            with connect(self.config, self.role) as conn, conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE cma_input_requests SET request_id = %s, review_digest = %s, "
+                    "review_authority = %s, review_object_key = %s, human_ruling = NULL, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE request_id = %s AND task_id = %s "
+                    "AND status = 'pending' AND decision IS NULL AND confirmation_attempted_at IS NULL "
+                    "AND EXISTS (SELECT 1 FROM cma_tasks t JOIN cma_contexts c ON "
+                    "c.context_id = t.context_id "
+                    "WHERE t.task_id = cma_input_requests.task_id AND c.context_id = %s "
+                    "AND c.active_task_id = t.task_id AND t.internal_state <> 'terminal' "
+                    "AND t.cancel_requested_at IS NULL AND c.scheduler_claim_id = %s "
+                    "AND c.scheduler_lease_expires_at > CURRENT_TIMESTAMP FOR UPDATE OF t, c) "
+                    "RETURNING request_id",
+                    (
+                        str(uuid.uuid4()),
+                        digest,
+                        authority,
+                        object_key,
+                        request_id,
+                        task_id,
+                        context_id,
+                        claim_id,
+                    ),
+                )
+                if cur.fetchone() is None:
+                    raise LostSchedulerClaim(context_id)
+
+        with_dsql_retry(operation)
+
+    def record_human_ruling(self, request_id: str, task_id: str, ruling: str) -> bool:
+        """First authenticated ruling wins; repeated identical submissions are idempotent."""
+        if ruling not in {"allow", "deny"}:
+            raise ValueError("Unknown human ruling")
+
+        def operation() -> bool:
+            with connect(self.config, self.role) as conn, conn.cursor() as cur:
+                cur.execute(
+                    "SELECT r.* FROM cma_input_requests r JOIN cma_tasks t ON t.task_id = r.task_id "
+                    "JOIN cma_contexts c ON c.context_id = t.context_id "
+                    "WHERE r.request_id = %s AND r.task_id = %s AND r.review_digest IS NOT NULL "
+                    "AND c.active_task_id = t.task_id AND t.cancel_requested_at IS NULL "
+                    "AND t.internal_state <> 'terminal' FOR UPDATE OF r, t, c",
+                    (request_id, task_id),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return False
+                if row["human_ruling"] is not None:
+                    return row["human_ruling"] == ruling
+                if row["status"] != "pending" or not row["review_object_key"]:
+                    return False
+                cur.execute(
+                    "UPDATE cma_input_requests SET human_ruling = %s, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE request_id = %s",
+                    (ruling, request_id),
+                )
+                return True
+
+        return with_dsql_retry(operation)
+
     def claim_scheduler(self, context_id: str, lease_seconds: int = 60) -> str | None:
         claim_id = str(uuid.uuid4())
 
@@ -205,6 +308,13 @@ class ControllerRuntimeRepository(CmaControllerRepository):
                 "WHERE decision_reason_object_key IS NOT NULL AND status <> 'resolved'"
             )
             keys.update(str(row["decision_reason_object_key"]) for row in cur.fetchall())
+            cur.execute(
+                "SELECT review_object_key FROM cma_input_requests r JOIN cma_tasks t ON "
+                "t.task_id = r.task_id "
+                "WHERE review_object_key IS NOT NULL AND r.status <> 'resolved' AND "
+                "t.internal_state <> 'terminal'"
+            )
+            keys.update(str(row["review_object_key"]) for row in cur.fetchall())
             cur.execute(
                 "SELECT answer_object_key FROM cma_clarification_requests "
                 "WHERE answer_object_key IS NOT NULL AND status <> 'resolved'"
@@ -434,29 +544,20 @@ class ControllerRuntimeRepository(CmaControllerRepository):
             )
             return cur.fetchone() is not None
 
-    def decide_input_request(
-        self, request_id: str, task_id: str, decision: str, reason_object_key: str | None = None
-    ) -> dict[str, Any] | None:
-        if decision not in {"allow", "deny"}:
-            raise ValueError("Unknown tool decision")
+    def deny_cancelled_input_request(self, request_id: str, context_id: str, claim_id: str) -> None:
+        """Cancellation cleanup is independent of policy availability and remains fenced."""
         with connect(self.config, self.role) as conn, conn.cursor() as cur:
             cur.execute(
-                "UPDATE cma_input_requests SET status = 'resolving', decision = %s, "
-                "decision_reason_object_key = %s, "
-                "updated_at = CURRENT_TIMESTAMP WHERE request_id = %s AND task_id = %s "
-                "AND status = 'pending' AND EXISTS "
-                "(SELECT 1 FROM cma_tasks t WHERE t.task_id = cma_input_requests.task_id "
-                "AND (t.internal_state = 'input_required' OR t.cancel_requested_at IS NOT NULL)) "
-                "RETURNING *",
-                (decision, reason_object_key, request_id, task_id),
+                "UPDATE cma_input_requests SET status = 'resolving', decision = 'deny', "
+                "updated_at = CURRENT_TIMESTAMP WHERE request_id = %s "
+                "AND status IN ('pending', 'resolving') AND confirmation_attempted_at IS NULL "
+                "AND EXISTS (SELECT 1 FROM cma_tasks t JOIN cma_contexts c ON c.context_id = t.context_id "
+                "WHERE t.task_id = cma_input_requests.task_id AND t.cancel_requested_at IS NOT NULL "
+                "AND c.active_task_id = t.task_id AND t.internal_state <> 'terminal' "
+                "AND c.context_id = %s AND c.scheduler_claim_id = %s "
+                "AND c.scheduler_lease_expires_at > CURRENT_TIMESTAMP)",
+                (request_id, context_id, claim_id),
             )
-            if row := cur.fetchone():
-                return row
-            cur.execute(
-                "SELECT * FROM cma_input_requests WHERE request_id = %s AND task_id = %s",
-                (request_id, task_id),
-            )
-            return cur.fetchone()
 
     def resolve_input_request(self, request_id: str, context_id: str, claim_id: str) -> None:
         with connect(self.config, self.role) as conn, conn.cursor() as cur:
@@ -487,7 +588,11 @@ class ControllerRuntimeRepository(CmaControllerRepository):
                 "AND confirmation_attempted_at IS NULL AND EXISTS "
                 "(SELECT 1 FROM cma_tasks t JOIN cma_contexts c ON c.context_id = t.context_id "
                 "WHERE t.task_id = cma_input_requests.task_id AND c.context_id = %s "
-                "AND c.scheduler_claim_id = %s AND c.scheduler_lease_expires_at > CURRENT_TIMESTAMP) "
+                "AND (cma_input_requests.decision = 'deny' OR t.cancel_requested_at IS NULL) "
+                "AND cma_input_requests.decision IN ('allow', 'deny') "
+                "AND c.active_task_id = t.task_id AND t.internal_state <> 'terminal' "
+                "AND c.scheduler_claim_id = %s AND c.scheduler_lease_expires_at > CURRENT_TIMESTAMP FOR "
+                "UPDATE OF t, c) "
                 "RETURNING request_id",
                 (request_id, context_id, claim_id),
             )

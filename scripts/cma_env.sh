@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export PYTHONDONTWRITEBYTECODE=1
 # Source this after loading .env in local controller/live-test launchers.
 # The caller supplies CMA_REPOSITORY_ROOT; the runtime never parses the lock.
 cma_resolved_json="$(python3 "$CMA_REPOSITORY_ROOT/scripts/cma_lock.py" json)" || return 1

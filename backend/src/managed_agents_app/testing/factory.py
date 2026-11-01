@@ -7,10 +7,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
+from fastapi import FastAPI
 
-from managed_agents_app.a2a_client.client import A2AControllerClient
 from managed_agents_app.a2a_event_sink.app import create_app as create_sink
-from managed_agents_app.a2a_event_sink.repository import EventSinkRepository
 from managed_agents_app.agents.registry import AgentRegistration, AgentRegistry
 from managed_agents_app.cma_controller.app import create_app as create_controller
 from managed_agents_app.cma_controller.composition import build_controller
@@ -27,9 +26,10 @@ from managed_agents_app.testing.fake_cma_provider import FakeCmaProvider
 from managed_agents_app.testing.faults import FaultInjector
 from managed_agents_app.testing.local_event_bus import LocalEventBus
 from managed_agents_app.testing.local_queue import LocalQueue
+from managed_agents_app.testing.preview import LocalPreviewTrigger
 from managed_agents_app.testing.recording_slack import RecordingSlack
 
-CONTROLLER_URL = "http://a2a.local"
+CONTROLLER_URL = os.getenv("LOCAL_A2A_URL", "http://a2a.local")
 SINK_BASE = "http://a2a-sink.local/internal/a2a/events"
 
 
@@ -37,6 +37,8 @@ class LocalA2AHarness:
     def __init__(self, config: AppConfig, bus: LocalEventBus) -> None:
         self.bus = bus
         self.provider = FakeCmaProvider()
+        self.preview_trigger = LocalPreviewTrigger()
+        self.slack_preview_trigger = LocalPreviewTrigger()
         self.scheduler_trigger = LocalSchedulerTrigger()
         self.push_trigger = AsyncLocalPushTrigger()
         self.pending_directory = Path(tempfile.mkdtemp(prefix="slack-a2a-e2e-"))
@@ -49,6 +51,7 @@ class LocalA2AHarness:
             push_trigger=self.push_trigger,
             push_http=httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: httpx.Response(204))),
         )
+        self.baseline_policy = self.composition.scheduler.policy_engine
         self.controller = create_controller(
             self.composition.service,
             CONTROLLER_URL,
@@ -73,24 +76,22 @@ class LocalA2AHarness:
             pushed = list(self.push_trigger.pending)
             self.push_trigger.pending.clear()
             if pushed:
+                sink = create_sink(
+                    ThreadRepository(self.config),
+                    AgentRegistry([AgentRegistration("cma", CONTROLLER_URL)]),
+                    self.bus,
+                )
                 async with httpx.AsyncClient(
-                    transport=httpx.ASGITransport(app=self.controller), base_url=CONTROLLER_URL
-                ) as controller_http:
-                    client = A2AControllerClient(
-                        AgentRegistry([AgentRegistration("cma", CONTROLLER_URL)]), controller_http
+                    transport=httpx.ASGITransport(app=sink), base_url="http://a2a-sink.local"
+                ) as sink_http:
+                    dispatcher = PushDispatcher(
+                        PushRepository(self.composition.repository),
+                        self.composition.service,
+                        self.push_trigger,
+                        sink_http,
                     )
-                    sink = create_sink(EventSinkRepository(ThreadRepository(self.config)), client, self.bus)
-                    async with httpx.AsyncClient(
-                        transport=httpx.ASGITransport(app=sink), base_url="http://a2a-sink.local"
-                    ) as sink_http:
-                        dispatcher = PushDispatcher(
-                            PushRepository(self.composition.repository),
-                            self.composition.service,
-                            self.push_trigger,
-                            sink_http,
-                        )
-                        for context_id, _ in pushed:
-                            await dispatcher.run_context(context_id)
+                    for context_id, _, _ in pushed:
+                        await dispatcher.run_context(context_id)
             if not scheduled and not pushed:
                 return
         raise RuntimeError("Local A2A controller did not quiesce")
@@ -107,9 +108,14 @@ class LocalA2AHarness:
         }
 
     def reset(self) -> None:
+        self.composition.scheduler.preview_trigger = None
+        self.preview_trigger.hints.clear()
+        self.slack_preview_trigger.hints.clear()
+        self.preview_trigger.streams = 0
+        self.composition.scheduler.policy_engine = self.baseline_policy
         self.provider.sessions.clear()
         self.provider.events.clear()
-        self.provider.listeners.clear()
+        self.provider.stream_calls = 0
         self.provider.scripted_turns.clear()
         self.provider.create_calls = self.provider.send_calls = 0
         self.provider.confirm_calls = self.provider.custom_result_calls = self.provider.interrupt_calls = 0
@@ -144,7 +150,13 @@ def create_runtime(config: AppConfig) -> Runtime:
     bus = LocalEventBus(auto_drain=os.getenv("LOCAL_EVENT_BUS_AUTO_DRAIN") == "true")
     runtime = Runtime(config, Database(config), RecordingSlack(), bus, FaultInjector())
     harness = LocalA2AHarness(config, bus)
-    runtime.a2a_transport = httpx.ASGITransport(app=harness.controller)
+    controller_transport = FastAPI()
+    controller_path = urlparse(CONTROLLER_URL).path
+    if controller_path:
+        controller_transport.mount(controller_path, harness.controller)
+    runtime.a2a_transport = httpx.ASGITransport(
+        app=controller_transport if controller_path else harness.controller
+    )
     runtime.local_a2a = harness
     from managed_agents_app.handlers import agent_input_sqs
 
@@ -165,10 +177,6 @@ def create_runtime(config: AppConfig) -> Runtime:
             "SlackMessageReceived",
             "SlackThreadStopRequested",
             "SlackToolConfirmationRequested",
-            "SlackFeedbackReceived",
-            "SlackShortcutReceived",
-            "SlackThreadLinkRequested",
-            "SlackThreadLinkShared",
         }:
             queue.send(event)
         else:

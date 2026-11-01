@@ -5,8 +5,6 @@ from typing import Any
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from managed_agents_app.slack.blocks import denial_reason_modal
-
 
 class SlackClient:
     def __init__(self, token: str, raw: WebClient | None = None) -> None:
@@ -147,10 +145,15 @@ class SlackClient:
             payload["markdown_text"] = text
         if chunks is not None:
             payload["chunks"] = chunks
-        self._require(
-            self.raw.chat_stopStream(**payload),
-            "chat.stopStream",
-        )
+        try:
+            response = self.raw.chat_stopStream(**payload)
+        except SlackApiError as error:
+            if error.response.get("error") == "message_not_in_streaming_state":
+                return
+            raise
+        if response.get("error") == "message_not_in_streaming_state":
+            return
+        self._require(response, "chat.stopStream")
 
     def message_permalink(self, channel_id: str, message_ts: str) -> str:
         response = self._require(
@@ -172,22 +175,3 @@ class SlackClient:
         if not response.get("ok") and response.get("error") == "already_reacted":
             return
         self._require(response, "reactions.add")
-
-    def open_denial_modal(self, trigger_id: str, metadata: dict[str, str]) -> None:
-        self._require(
-            self.raw.views_open(trigger_id=trigger_id, view=denial_reason_modal(metadata)),
-            "views.open",
-        )
-
-    def conversation_replies(self, channel_id: str, message_ts: str, limit: int = 50) -> list[dict[str, Any]]:
-        response = self._require(
-            self.raw.conversations_replies(channel=channel_id, ts=message_ts, limit=limit),
-            "conversations.replies",
-        )
-        return list(response.get("messages") or [])
-
-    def unfurl(self, channel_id: str, message_ts: str, unfurls: dict[str, Any]) -> None:
-        self._require(
-            self.raw.chat_unfurl(channel=channel_id, ts=message_ts, unfurls=unfurls),
-            "chat.unfurl",
-        )

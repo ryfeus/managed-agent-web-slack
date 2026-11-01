@@ -1,8 +1,9 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { test, expect } from '@playwright/test';
-// Bot posts anchor signed synthetic human events. A separate manual check proves actual Slack delivery.
-test('live Phase 6: Slack and Web share A2A Tasks, approval, and stop', async ({ page, request }) => {
+import { createLiveSlackClient } from '../helpers/live-slack';
+// Bot posts anchor signed synthetic human events. test:live proves actual Slack delivery via APIs.
+test('live Slack and Web share A2A Tasks, automatic policy, and stop', async ({ page, request }) => {
     const env = process.env;
     const base = env.E2E_LIVE_BASE_URL!;
     const channel = env.E2E_LIVE_SLACK_CHANNEL_ID!;
@@ -14,15 +15,7 @@ test('live Phase 6: Slack and Web share A2A Tasks, approval, and stop', async ({
             '--team-id', team, '--channel-id', channel, '--thread-ts', threadTs,
         ], { encoding: 'utf8', timeout: 30000, env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } }));
     }
-    async function slack(method: string, data: Record<string, string | number | boolean>): Promise<any> {
-        const response = await request.post(`https://slack.com/api/${method}`, {
-            headers: { authorization: `Bearer ${env.SLACK_BOT_TOKEN}` },
-            form: data,
-        });
-        const result = await response.json();
-        expect(result.ok, result.error).toBeTruthy();
-        return result;
-    }
+    const slack = createLiveSlackClient(request, env);
     async function signed(payload: object, interaction = false) {
         const raw = interaction ? new URLSearchParams({ payload: JSON.stringify(payload) }).toString() : JSON.stringify(payload);
         const ts = Math.floor(Date.now() / 1000).toString();
@@ -59,7 +52,7 @@ test('live Phase 6: Slack and Web share A2A Tasks, approval, and stop', async ({
         expect(state.binding.context_id).toBeTruthy();
         expect(state.legacy_tables_present).toEqual([]);
         expect(state.tasks[0].client_message_id).toContain(event.event_id);
-        await expect.poll(() => inspect(thread).tasks[0].push_receipts).toBeGreaterThan(0);
+        await expect.poll(() => inspect(thread).tasks[0].push_delivered).toBe(true);
     });
     await test.step('bound-thread continuation', async () => {
         const threadId = inspect(thread).binding.thread_id;
@@ -69,65 +62,30 @@ test('live Phase 6: Slack and Web share A2A Tasks, approval, and stop', async ({
         expect(await responseCount(`SECOND_${run}`)).toBe(1);
         expect(inspect(thread).binding.thread_id).toBe(threadId);
     });
-    async function approvalMessage(taskId?: string): Promise<any> {
-        let message: any;
-        await expect.poll(async () => {
-            message = (await replies()).find(m => m.blocks?.some((b: any) => b.elements?.some((e: any) => {
-                if (e.action_id !== 'agent_tool_allow') return false;
-                return !taskId || JSON.parse(e.value).taskId === taskId;
-            })));
-            return Boolean(message);
-        }, { intervals: [1000, 2000, 5000] }).toBe(true);
-        return message;
-    }
-    await test.step('deny with reason resolves the A2A request', async () => {
-        await input('Use web_fetch to fetch https://example.com and then briefly summarize it.');
-        const message = await approvalMessage();
-        const action = message.blocks.flatMap((b: any) => b.elements || []).find((e: any) => e.action_id === 'agent_tool_allow');
-        const identifiers = JSON.parse(action.value) as { taskId: string; requestId: string };
-        const reason = `Sandbox denial ${run}`;
-        await signed({
-            type: 'view_submission', team: { id: team }, user: { id: user },
-            view: {
-                callback_id: 'agent_tool_deny_reason',
-                private_metadata: JSON.stringify({
-                    team_id: team, channel_id: channel, thread_ts: thread,
-                    task_id: identifiers.taskId, request_id: identifiers.requestId,
-                    response_message_ts: message.ts,
-                }),
-                state: { values: { reason: { value: { value: reason } } } },
-            },
-        }, true);
-        await expect.poll(async () => (await replies()).find(m => m.ts === message.ts)?.text || '',
-            { intervals: [1000, 2000, 5000] }).toContain(reason);
-        await expect.poll(() => inspect(thread).tasks.find((task: any) => task.task_id === identifiers.taskId)?.controller_state)
-            .not.toBe('INPUT_REQUIRED');
-    });
-    await test.step('Allow resumes the same A2A Task', async () => {
-        await input('Use web_fetch to fetch https://example.com and then briefly summarize it.');
-        const message = await approvalMessage();
-        const action = message.blocks.flatMap((b: any) => b.elements || []).find((e: any) => e.action_id === 'agent_tool_allow');
-        const taskId = JSON.parse(action.value).taskId as string;
-        await signed({
-            type: 'block_actions', team: { id: team }, user: { id: user }, channel: { id: channel },
-            message: { ts: message.ts, thread_ts: thread },
-            actions: [{ action_id: 'agent_tool_allow', value: action.value }],
-        }, true);
-        await expect.poll(() => inspect(thread).tasks.find((task: any) => task.task_id === taskId)?.controller_state,
+    await test.step('OpenAPPA automatically allows the governed Slack tool', async () => {
+        const count = inspect(thread).tasks.length;
+        await input(`Use web_fetch exactly once to fetch https://example.com and reply with TOOL_${run}.`);
+        await expect.poll(() => inspect(thread).tasks.length).toBe(count + 1);
+        const taskId = inspect(thread).tasks.at(-1).task_id;
+        await expect.poll(() => inspect(thread).tasks.find((t: any) => t.task_id === taskId)?.controller_state,
             { intervals: [1000, 2000, 5000] }).toBe('COMPLETED');
+        expect(inspect(thread).tasks.at(-1).input_requests).toEqual([
+            expect.objectContaining({decision: 'allow', status: 'resolved'}),
+        ]);
+        await answer(`TOOL_${run}`);
+        expect(JSON.stringify(await replies())).not.toContain('agent_tool_allow');
     });
-    await test.step('Stop cancels the active A2A Task', async () => {
-        const completedTasks = inspect(thread).tasks.filter((task: any) => task.controller_state === 'COMPLETED').map((task: any) => task.task_id);
-        await input('Use web_fetch to fetch https://example.com and then briefly summarize it.');
-        const message = await approvalMessage();
-        const action = message.blocks.flatMap((b: any) => b.elements || []).find((e: any) => e.action_id === 'agent_tool_allow');
-        const taskId = JSON.parse(action.value).taskId as string;
+    await test.step('Stop cancels the active WORKING A2A Task', async () => {
+        const count = inspect(thread).tasks.length;
+        const completedTasks = inspect(thread).tasks.filter((t: any) => t.controller_state === 'COMPLETED');
+        await input('Write a detailed 10000-word tutorial on distributed systems, covering each component in depth.');
+        await expect.poll(() => inspect(thread).tasks.length).toBe(count + 1);
+        const taskId = inspect(thread).tasks.at(-1).task_id;
+        await expect.poll(() => inspect(thread).tasks.at(-1).controller_state).toBe('WORKING');
         await signed({ type: 'event_callback', team_id: team, event_id: `Ev_${randomUUID()}`, event: { type: 'agent_session_stopped', user, channel, thread_ts: thread } });
-        await expect.poll(() => inspect(thread).tasks.find((task: any) => task.task_id === taskId)?.controller_state,
+        await expect.poll(() => inspect(thread).tasks.find((t: any) => t.task_id === taskId)?.controller_state,
             { intervals: [1000, 2000, 5000] }).toBe('CANCELED');
-        for (const completedTaskId of completedTasks) {
-            expect(inspect(thread).tasks.find((task: any) => task.task_id === completedTaskId)?.controller_state).toBe('COMPLETED');
-        }
+        for (const completed of completedTasks) expect(inspect(thread).tasks.find((t: any) => t.task_id === completed.task_id)?.controller_state).toBe('COMPLETED');
     });
     await test.step('Web continues the Slack-bound A2A thread', async () => {
         const taskCount = inspect(thread).tasks.length;
@@ -166,58 +124,24 @@ test('live Phase 6: Slack and Web share A2A Tasks, approval, and stop', async ({
         expect(inspect(thread).tasks.filter((item: any) => item.task_id === task.task_id)).toHaveLength(1);
         expect(await responseCount(marker)).toBe(1);
     });
-    await test.step('Web approval survives reload and resumes one A2A Task', async () => {
-        const task = await webSend('Use web_fetch to fetch https://example.com and then briefly summarize it.');
-        await expect.poll(() => inspect(thread).tasks.find((item: any) => item.task_id === task.task_id)?.controller_state)
-            .toBe('INPUT_REQUIRED');
-        await expect(page.locator('.tool-call')).toContainText('web_fetch');
+    await test.step('Web automatic policy survives reload without controls', async () => {
+        const task = await webSend(`Use web_fetch exactly once to fetch https://example.com and reply WEB_TOOL_${run}.`);
         await page.reload();
-        await expect(page.locator('.tool-call')).toContainText('web_fetch');
-        await page.getByRole('button', { name: 'Allow', exact: true }).click();
-        await page.getByRole('button', { name: 'Submit responses' }).click();
-        await expect.poll(() => inspect(thread).tasks.find((item: any) => item.task_id === task.task_id)?.controller_state)
-            .toBe('COMPLETED');
-        expect(inspect(thread).tasks.filter((item: any) => item.task_id === task.task_id)).toHaveLength(1);
-    });
-    await test.step('Web and Slack race to resolve one approval', async () => {
-        const task = await webSend('Use web_fetch to fetch https://example.com and then briefly summarize it.');
-        await expect.poll(() => inspect(thread).tasks.find((item: any) => item.task_id === task.task_id)?.controller_state)
-            .toBe('INPUT_REQUIRED');
-        const message = await approvalMessage(task.task_id);
-        const action = message.blocks.flatMap((b: any) => b.elements || []).find((e: any) => e.action_id === 'agent_tool_allow');
-        const identifiers = JSON.parse(action.value) as { taskId: string; requestId: string };
-        expect(identifiers.taskId).toBe(task.task_id);
-        await page.getByRole('button', { name: 'Allow', exact: true }).click();
-        await Promise.all([
-            page.getByRole('button', { name: 'Submit responses' }).click(),
-            signed({
-                type: 'view_submission', team: { id: team }, user: { id: user },
-                view: {
-                    callback_id: 'agent_tool_deny_reason',
-                    private_metadata: JSON.stringify({
-                        team_id: team, channel_id: channel, thread_ts: thread,
-                        task_id: task.task_id, request_id: identifiers.requestId,
-                        response_message_ts: message.ts,
-                    }),
-                    state: { values: { reason: { value: { value: `Race denial ${run}` } } } },
-                },
-            }, true),
-        ]);
-        await expect.poll(() => inspect(thread).tasks.find((item: any) => item.task_id === task.task_id)?.controller_state,
-            { intervals: [1000, 2000, 5000] }).toBe('COMPLETED');
-        const requests = inspect(thread).tasks.find((item: any) => item.task_id === task.task_id).input_requests;
+        await expect.poll(() => inspect(thread).tasks.find((t: any) => t.task_id === task.task_id)?.controller_state).toBe('COMPLETED');
+        await expect(page.locator('.assistant-message').last()).toContainText(`WEB_TOOL_${run}`);
+        await expect(page.getByRole('button', {name: 'Allow', exact: true})).toHaveCount(0);
+        const requests = inspect(thread).tasks.find((t: any) => t.task_id === task.task_id).input_requests;
         expect(requests).toHaveLength(1);
-        expect(requests[0].request_id).toBe(identifiers.requestId);
-        expect(requests[0].status).toBe('resolved');
-        expect(['allow', 'deny']).toContain(requests[0].decision);
-        await page.reload();
-        await expect(page.locator('.tool-call')).toHaveCount(0);
+        expect(requests[0]).toMatchObject({status: 'resolved', decision: 'allow'});
+        await signed({type: 'block_actions', team: {id: team}, user: {id: user}, channel: {id: channel},
+            message: {ts: root.ts, thread_ts: thread}, actions: [{action_id: 'agent_tool_deny',
+                value: JSON.stringify({taskId: task.task_id, requestId: requests[0].request_id})}]}, true);
+        expect(inspect(thread).tasks.find((t: any) => t.task_id === task.task_id).input_requests[0].decision).toBe('allow');
     });
-    await test.step('Web Stop cancels an INPUT_REQUIRED A2A Task', async () => {
-        const task = await webSend('Use web_fetch to fetch https://example.com and then briefly summarize it.');
+    await test.step('Web Stop cancels a WORKING A2A Task', async () => {
+        const task = await webSend('Write a detailed 10000-word tutorial on distributed systems, covering each component in depth.');
         await expect.poll(() => inspect(thread).tasks.find((item: any) => item.task_id === task.task_id)?.controller_state)
-            .toBe('INPUT_REQUIRED');
-        await expect(page.locator('.tool-call')).toContainText('web_fetch');
+            .toBe('WORKING');
         await page.getByRole('button', { name: 'Stop', exact: true }).click();
         await expect.poll(() => inspect(thread).tasks.find((item: any) => item.task_id === task.task_id)?.controller_state)
             .toBe('CANCELED');
@@ -227,10 +151,10 @@ test('live Phase 6: Slack and Web share A2A Tasks, approval, and stop', async ({
         await expect(page.locator('.tool-call')).toHaveCount(0);
         expect(inspect(thread).tasks.filter((item: any) => item.task_id === task.task_id)).toHaveLength(1);
     });
-    await test.step('Slack Stop clears a Web pending approval', async () => {
-        const task = await webSend('Use web_fetch to fetch https://example.com and then briefly summarize it.');
+    await test.step('Slack Stop clears a Web WORKING Task', async () => {
+        const task = await webSend('Write a detailed 10000-word tutorial on distributed systems, covering each component in depth.');
         await expect.poll(() => inspect(thread).tasks.find((item: any) => item.task_id === task.task_id)?.controller_state)
-            .toBe('INPUT_REQUIRED');
+            .toBe('WORKING');
         await signed({ type: 'event_callback', team_id: team, event_id: `Ev_${randomUUID()}`, event: { type: 'agent_session_stopped', user, channel, thread_ts: thread } });
         await expect.poll(() => inspect(thread).tasks.find((item: any) => item.task_id === task.task_id)?.controller_state,
             { intervals: [1000, 2000, 5000] }).toBe('CANCELED');

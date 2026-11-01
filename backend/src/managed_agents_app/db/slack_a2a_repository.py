@@ -117,7 +117,8 @@ class SlackA2ARepository:
                 "lease_expires_at = CURRENT_TIMESTAMP + (%s * INTERVAL '1 second'), "
                 "attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP "
                 "WHERE binding_id = %s AND task_id = %s AND "
-                "(status = 'pending' OR (status = 'streaming' AND lease_expires_at <= CURRENT_TIMESTAMP)) "
+                "(status IN ('pending', 'fallback', 'completed') OR "
+                "(status = 'streaming' AND lease_expires_at <= CURRENT_TIMESTAMP)) "
                 "RETURNING *",
                 (token, lease_seconds, binding_id, task_id),
             )
@@ -151,11 +152,20 @@ class SlackA2ARepository:
         with connect(self.config, self.role) as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE slack_task_projections SET status = %s, last_task_state = %s, "
+                "slack_message_ts = CASE WHEN %s THEN NULL ELSE slack_message_ts END, "
                 "last_error = %s, claim_id = NULL, lease_expires_at = NULL, "
                 "updated_at = CURRENT_TIMESTAMP WHERE binding_id = %s AND task_id = %s AND claim_id = %s",
                 (
-                    "fallback" if fallback else "completed",
+                    "fallback"
+                    if fallback
+                    else (
+                        "completed"
+                        if state in {"INPUT_REQUIRED", "COMPLETED", "CANCELED", "FAILED", "REJECTED"}
+                        else "pending"
+                    ),
                     state,
+                    not fallback
+                    and state in {"INPUT_REQUIRED", "COMPLETED", "CANCELED", "FAILED", "REJECTED"},
                     error[:1000] if error else None,
                     binding_id,
                     task_id,
@@ -176,9 +186,39 @@ class SlackA2ARepository:
         with connect(self.config, self.role) as conn, conn.cursor() as cur:
             cur.execute(
                 "UPDATE slack_task_projections SET last_task_state = %s, status = %s, "
+                "slack_message_ts = CASE WHEN %s THEN NULL ELSE slack_message_ts END, "
                 "updated_at = CURRENT_TIMESTAMP WHERE binding_id = %s AND task_id = %s "
                 "AND (status != 'streaming' OR lease_expires_at <= CURRENT_TIMESTAMP)",
-                (state, status, binding_id, task_id),
+                (state, status, status == "completed", binding_id, task_id),
+            )
+
+    def human_input_messages(self, binding_id: str, task_id: str) -> list[dict[str, Any]]:
+        with connect(self.config, self.role) as conn:
+            return conn.execute(
+                "SELECT item_id, slack_message_ts FROM slack_projection_items "
+                "WHERE binding_id = %s AND task_id = %s AND item_kind = 'human_input' "
+                "AND status = 'posted' AND slack_message_ts IS NOT NULL",
+                (binding_id, task_id),
+            ).fetchall()
+
+    def has_human_input_receipt(self, binding_id: str, task_id: str) -> bool:
+        # Closed controls retain their receipt even after the Task resumes WORKING.
+        with connect(self.config, self.role) as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM slack_projection_items WHERE binding_id = %s AND task_id = %s "
+                    "AND item_kind = 'human_input' AND status = 'posted' LIMIT 1",
+                    (binding_id, task_id),
+                ).fetchone()
+                is not None
+            )
+
+    def close_human_input(self, binding_id: str, task_id: str, item_id: str) -> None:
+        with connect(self.config, self.role) as conn:
+            conn.execute(
+                "UPDATE slack_projection_items SET slack_message_ts = NULL "
+                "WHERE binding_id = %s AND task_id = %s AND item_kind = 'human_input' AND item_id = %s",
+                (binding_id, task_id, item_id),
             )
 
     def claim_item(
@@ -240,35 +280,5 @@ class SlackA2ARepository:
                     kind,
                     item_id,
                     token,
-                ),
-            )
-
-    def store_feedback(
-        self,
-        interaction_id: str,
-        principal_id: str,
-        thread_id: str,
-        task_id: str,
-        message_id: str | None,
-        external_message_id: str | None,
-        rating: str,
-        reason: str | None,
-    ) -> None:
-        with connect(self.config, self.role) as conn, conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO thread_feedback (feedback_id, interaction_id, principal_id, thread_id, "
-                "task_id, message_id, surface, external_message_id, rating, reason) "
-                "VALUES (%s, %s, %s, %s, %s, %s, 'slack', %s, %s, %s) "
-                "ON CONFLICT (interaction_id) DO NOTHING",
-                (
-                    str(uuid.uuid4()),
-                    interaction_id,
-                    principal_id,
-                    thread_id,
-                    task_id,
-                    message_id,
-                    external_message_id,
-                    rating,
-                    reason,
                 ),
             )

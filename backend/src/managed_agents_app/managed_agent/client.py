@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any, Literal, cast
 
 from anthropic import Anthropic
@@ -113,22 +112,6 @@ class ManagedAgentClient:
 
     def list_events(self, session_id: str) -> list[dict[str, Any]]:
         return [as_dict(event) for event in self.raw.beta.sessions.events.list(session_id, limit=100)]
-
-    def stream_events(
-        self,
-        session_id: str,
-        *,
-        include_thinking: bool = True,
-        timeout_seconds: float = 45.0,
-    ) -> Iterator[dict[str, Any]]:
-        delta_types: list[Literal["agent.message", "agent.thinking"]] = (
-            ["agent.message", "agent.thinking"] if include_thinking else ["agent.message"]
-        )
-        stream = self.raw.beta.sessions.events.stream(
-            session_id, event_deltas=delta_types, timeout=timeout_seconds
-        )
-        for event in stream:
-            yield as_dict(event)
 
     def send_message(self, session_id: str, text: str, system_context: str | None = None) -> str | None:
         events: list[dict[str, Any]] = []

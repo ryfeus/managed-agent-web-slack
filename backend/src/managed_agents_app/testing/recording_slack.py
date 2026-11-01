@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from copy import deepcopy
 from threading import RLock
 from typing import Any, cast
@@ -17,8 +18,6 @@ class RecordingSlack(SlackClient):
         self.streams: dict[str, dict[str, Any]] = {}
         self.reactions: list[dict[str, Any]] = []
         self.statuses: list[dict[str, Any]] = []
-        self.modals: list[dict[str, Any]] = []
-        self.unfurls: list[dict[str, Any]] = []
         self.failures: list[dict[str, Any]] = []
         self.counter = 0
         super().__init__("e2e", raw=cast(Any, _Recorder(self)))
@@ -45,7 +44,7 @@ class RecordingSlack(SlackClient):
             result: dict[str, Any] = {"ok": True}
             if operation in {"chat.postMessage", "chat.startStream"}:
                 self.counter += 1
-                ts = f"1000.{self.counter:06d}"
+                ts = f"{int(time.time())}.{self.counter:06d}"
                 message = {**deepcopy(payload), "ts": ts, "text": payload.get("text", "")}
                 self.messages[ts] = message
                 if operation == "chat.startStream":
@@ -77,16 +76,6 @@ class RecordingSlack(SlackClient):
                     self.reactions.append(deepcopy(payload))
             elif operation == "agents.sessions.setStatus":
                 self.statuses.append(deepcopy(payload))
-            elif operation == "views.open":
-                self.modals.append(deepcopy(payload))
-            elif operation == "chat.unfurl":
-                self.unfurls.append(deepcopy(payload))
-            elif operation == "conversations.replies":
-                result["messages"] = [
-                    deepcopy(m)
-                    for m in self.messages.values()
-                    if m["channel"] == payload["channel"] and m.get("thread_ts") == payload["ts"]
-                ]
             elif operation == "auth.test":
                 result.update(team_id="T001", user_id="BOT")
             elif operation != "agents.sessions.rename":
@@ -106,6 +95,10 @@ class RecordingSlack(SlackClient):
             if stream["mode"] != "chunks":
                 raise ValueError("Cannot mix text and chunk stream modes")
             stream["chunks"].extend(deepcopy(payload["chunks"]))
+            for chunk in payload["chunks"]:
+                if chunk["type"] == "task_update":
+                    cards = stream.setdefault("tasks", {})
+                    cards.setdefault(chunk["id"], {}).update(deepcopy(chunk))
             stream["text"] += "".join(
                 c.get("text", "") for c in payload["chunks"] if c["type"] == "markdown_text"
             )
@@ -119,8 +112,6 @@ class RecordingSlack(SlackClient):
                     "streams": list(self.streams.values()),
                     "reactions": self.reactions,
                     "agent_statuses": self.statuses,
-                    "modals": self.modals,
-                    "unfurls": self.unfurls,
                 }
             )
 
@@ -132,8 +123,6 @@ class RecordingSlack(SlackClient):
                 self.streams,
                 self.reactions,
                 self.statuses,
-                self.modals,
-                self.unfurls,
                 self.failures,
             ]:
                 cast(Any, collection).clear()

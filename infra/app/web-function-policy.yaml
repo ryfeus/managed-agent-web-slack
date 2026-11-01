@@ -1,0 +1,21 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Terraform-owned post-distribution policy, avoiding an origin dependency cycle
+Parameters:
+  FunctionArn: {Type: String}
+  EndpointArn: {Type: String}
+  DistributionArn: {Type: String}
+Resources:
+  InvokePolicy:
+    Type: AWS::Lambda::ResourcePolicy
+    Properties:
+      ResourceArn: !Ref FunctionArn
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: cloudfront.amazonaws.com}
+            Action: lambda:InvokeWebFunctionEndpoint
+            Resource: !Ref EndpointArn
+            Condition:
+              StringEquals:
+                aws:SourceArn: !Ref DistributionArn

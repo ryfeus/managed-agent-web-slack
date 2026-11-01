@@ -10,6 +10,7 @@ from managed_agents_app.db.thread_repository import ThreadRepository
 from managed_agents_app.faults import Faults, NoFaults
 from managed_agents_app.ports.events import EventBus
 from managed_agents_app.ports.slack import SlackGateway
+from managed_agents_app.slack.preview import SlackPreviewTrigger
 
 
 @dataclass
@@ -21,6 +22,7 @@ class Runtime:
     faults: Faults = field(default_factory=NoFaults)
     a2a_transport: object | None = None
     local_a2a: object | None = None
+    slack_preview_trigger: SlackPreviewTrigger | None = None
 
     @property
     def threads(self) -> ThreadRepository:
@@ -63,6 +65,18 @@ class ProductionRuntime:
         from managed_agents_app.events import EventBridgeEventBus
 
         return EventBridgeEventBus(self.config.event_bus_name)
+
+    @cached_property
+    def slack_preview_trigger(self) -> SlackPreviewTrigger | None:
+        from managed_agents_app.slack.preview import production_slack_preview_trigger
+
+        if not (
+            self.config.preview_enabled
+            and self.config.slack_preview_enabled
+            and self.config.slack_preview_queue_url
+        ):
+            return None
+        return production_slack_preview_trigger(self.config.slack_preview_queue_url)
 
 
 @lru_cache(maxsize=8)

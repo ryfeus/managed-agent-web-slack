@@ -1,0 +1,19 @@
+{
+  "name": "@managed-agents/preview",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-crypto/sha256-js": "5.2.0",
+    "@aws-sdk/credential-provider-node": "3.972.92",
+    "@smithy/signature-v4": "5.7.5",
+    "ws": "8.22.1"
+  },
+  "exports": "./src/index.ts"
+}

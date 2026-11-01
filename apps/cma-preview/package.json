@@ -1,0 +1,18 @@
+{
+  "name": "@managed-agents/cma-preview",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@a2a-js/sdk": "1.3.0",
+    "@anthropic-ai/sdk": "1.3.0",
+    "@aws-sdk/client-secrets-manager": "3.1161.0",
+    "@managed-agents/preview": "0.1.0"
+  }
+}

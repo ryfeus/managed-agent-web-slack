@@ -15,7 +15,6 @@ from google.protobuf.json_format import MessageToJson  # type: ignore[import-unt
 
 from managed_agents_app.a2a_client.client import A2AControllerClient, DefinitiveA2ARequestError
 from managed_agents_app.a2a_event_sink.app import create_app as create_sink
-from managed_agents_app.a2a_event_sink.repository import EventSinkRepository
 from managed_agents_app.agent_control_plane.service import ThreadAgentService
 from managed_agents_app.agents.registry import AgentRegistration, AgentRegistry
 from managed_agents_app.cma_controller import app as controller_app
@@ -218,7 +217,7 @@ async def test_thread_to_controller_to_sink_tracer_bullet(components) -> None:
         client = A2AControllerClient(
             AgentRegistry([AgentRegistration("cma", CONTROLLER_URL)]), controller_http
         )
-        sink = create_sink(EventSinkRepository(threads), client, bus)
+        sink = create_sink(threads, client.registry, bus)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=sink), base_url="http://a2a-event-sink.test"
         ) as sink_http:
@@ -230,7 +229,6 @@ async def test_thread_to_controller_to_sink_tracer_bullet(components) -> None:
             assert threads.get_task_binding("cma", first.id) is not None
             await scheduler.run_once(first.context_id)
             await dispatcher.run_context(first.context_id)
-            assert threads.get_task_binding("cma", first.id)["last_seen_task_state"] == "COMPLETED"
             events = bus.snapshot()["pending"]
             assert any(
                 event["detail-type"] == "A2ATaskUpdated" and event["detail"]["taskState"] == "COMPLETED"
@@ -251,11 +249,11 @@ async def test_thread_to_controller_to_sink_tracer_bullet(components) -> None:
             headers = {"Content-Type": "application/a2a+json", "X-A2A-Delivery-Id": stale_id}
             stale_response = await sink_http.post(SINK_URL, content=MessageToJson(stale), headers=headers)
             assert stale_response.status_code == 200
-            assert threads.get_task_binding("cma", first.id)["last_seen_task_state"] == "COMPLETED"
             count_after_stale = len(bus.snapshot()["pending"])
             duplicate_response = await sink_http.post(SINK_URL, content=MessageToJson(stale), headers=headers)
             assert duplicate_response.status_code == 200
-            assert len(bus.snapshot()["pending"]) == count_after_stale
+            assert len(bus.snapshot()["pending"]) == count_after_stale + 1
+            assert bus.snapshot()["pending"][-1]["detail"]["taskState"] == "WORKING"
 
             class FailOnceBus:
                 def __init__(self) -> None:
@@ -267,7 +265,7 @@ async def test_thread_to_controller_to_sink_tracer_bullet(components) -> None:
                         raise RuntimeError("injected EventBridge failure")
                     bus.publish(source, detail_type, detail)
 
-            failing_sink = create_sink(EventSinkRepository(threads), client, FailOnceBus())
+            failing_sink = create_sink(threads, client.registry, FailOnceBus())
             failure_id = hashlib.sha256(f"event-failure-{first.id}".encode()).hexdigest()
             failure_headers = {"Content-Type": "application/a2a+json", "X-A2A-Delivery-Id": failure_id}
             async with httpx.AsyncClient(
@@ -295,38 +293,29 @@ async def test_thread_to_controller_to_sink_tracer_bullet(components) -> None:
                 )
             ).status_code == 503
 
-            class LosePublishedMark(EventSinkRepository):
+            class LoseAcknowledgment:
                 def __init__(self) -> None:
-                    super().__init__(threads)
                     self.once = True
 
-                def mark_published(self, agent_id: str, delivery_id: str) -> None:
+                def publish(self, source, detail_type, detail):
+                    bus.publish(source, detail_type, detail)
                     if self.once:
                         self.once = False
-                        raise TimeoutError("receipt update response lost")
-                    super().mark_published(agent_id, delivery_id)
+                        raise TimeoutError("EventBridge acknowledgment lost")
 
-            lost_mark_sink = create_sink(LosePublishedMark(), client, bus)
-            lost_id = hashlib.sha256(f"lost-publish-{first.id}".encode()).hexdigest()
-            lost_headers = {"Content-Type": "application/a2a+json", "X-A2A-Delivery-Id": lost_id}
+            lost_ack_sink = create_sink(threads, client.registry, LoseAcknowledgment())
             async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=lost_mark_sink),
-                base_url="http://a2a-event-sink.test",
+                transport=httpx.ASGITransport(app=lost_ack_sink), base_url="http://a2a-event-sink.test"
             ) as lost_http:
                 before = len(bus.snapshot()["pending"])
                 assert (
-                    await lost_http.post(SINK_URL, content=MessageToJson(stale), headers=lost_headers)
+                    await lost_http.post(SINK_URL, content=MessageToJson(stale), headers=headers)
                 ).status_code == 503
                 assert (
-                    await lost_http.post(SINK_URL, content=MessageToJson(stale), headers=lost_headers)
+                    await lost_http.post(SINK_URL, content=MessageToJson(stale), headers=headers)
                 ).status_code == 200
                 assert len(bus.snapshot()["pending"]) == before + 2
             with connect(config) as conn:
-                receipt = conn.execute(
-                    "SELECT * FROM a2a_task_event_receipts WHERE task_id = %s", (first.id,)
-                ).fetchone()
-                assert receipt is not None and receipt["published_at"] is not None
-                assert "hello" not in str(receipt)
                 count = conn.execute(
                     "SELECT COUNT(*) AS total FROM cma_contexts WHERE context_id = %s",
                     (first.context_id,),
@@ -335,7 +324,7 @@ async def test_thread_to_controller_to_sink_tracer_bullet(components) -> None:
 
 
 @pytest.mark.asyncio
-async def test_push_retry_and_maintenance_after_success(components) -> None:
+async def test_push_queued_retry_and_manual_recovery_after_success(components) -> None:
     config, runtime, provider, service, scheduler, trigger, controller = components
     Database(config).ensure_principal(config.dev_principal_id)
     threads = ThreadRepository(config)
@@ -348,7 +337,7 @@ async def test_push_retry_and_maintenance_after_success(components) -> None:
             AgentRegistry([AgentRegistration("cma", CONTROLLER_URL)]), controller_http
         )
         control = ThreadAgentService(threads, client, "http://a2a-event-sink.test/internal/a2a/events")
-        sink = create_sink(EventSinkRepository(threads), client, bus)
+        sink = create_sink(threads, client.registry, bus)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=sink), base_url="http://a2a-event-sink.test"
         ) as good_http:
@@ -357,9 +346,6 @@ async def test_push_retry_and_maintenance_after_success(components) -> None:
             await scheduler.run_once(first.context_id)
             await dispatcher.run_context(first.context_id)
             assert PushRepository(runtime).get(first.id, "app-control-plane")["last_delivered_at"]
-            prior = len(trigger.pending)
-            assert await dispatcher.maintenance() >= 1
-            assert len(trigger.pending) > prior
 
             provider.automatic = False
             second = await control.send_turn(thread_id, str(uuid.uuid4()), "second")
@@ -373,6 +359,7 @@ async def test_push_retry_and_maintenance_after_success(components) -> None:
                 await failing.run_context(second.context_id)
             failed = PushRepository(runtime).get(second.id, "app-control-plane")
             assert failed["attempt_count"] == 1 and failed["next_attempt_at"] is not None
+            assert trigger.pending[-1] == (second.context_id, "push-retry", 5)
             session_id = str(runtime.get_context(second.context_id)["cma_session_id"])
             provider.emit(session_id, {"type": "agent.message", "content": [{"type": "text", "text": "new"}]})
             with connect(config) as conn:
@@ -382,7 +369,7 @@ async def test_push_retry_and_maintenance_after_success(components) -> None:
                     (second.id,),
                 )
             await dispatcher.run_context(second.context_id)
-            assert threads.get_task_binding("cma", second.id)["last_seen_task_state"] == "WORKING"
+            assert bus.snapshot()["pending"][-1]["detail"]["taskState"] == "WORKING"
             first_fingerprint = PushRepository(runtime).get(second.id, "app-control-plane")[
                 "last_delivered_fingerprint"
             ]
@@ -397,7 +384,7 @@ async def test_push_retry_and_maintenance_after_success(components) -> None:
             provider.finish(session_id, "latest")
             await scheduler.run_once(second.context_id)
             await dispatcher.run_context(second.context_id)
-            assert threads.get_task_binding("cma", second.id)["last_seen_task_state"] == "COMPLETED"
+            assert bus.snapshot()["pending"][-1]["detail"]["taskState"] == "COMPLETED"
             assert PushRepository(runtime).get(second.id, "app-control-plane")["attempt_count"] == 0
 
             third = await control.send_turn(thread_id, str(uuid.uuid4()), "third")
@@ -442,7 +429,7 @@ async def test_queued_cancel_schedules_push_wakeup(components) -> None:
     before = len(trigger.pending)
     cancelled = await service.cancel(task.id)
     assert cancelled.status.state == a2a.TaskState.TASK_STATE_CANCELED
-    assert trigger.pending[before:] == [(task.context_id, "queued-cancelled")]
+    assert trigger.pending[before:] == [(task.context_id, "queued-cancelled", 0)]
 
 
 @pytest.mark.asyncio
@@ -451,9 +438,6 @@ async def test_normal_composition_delivers_push_without_manual_dispatch(
 ) -> None:
     config = load_config().model_copy(update={"cma_a2a_push_allowed_url": SINK_URL})
     validate_local_database(config)
-    # Earlier tests use different fake providers; maintenance must not replay their fixtures.
-    with connect(config) as conn:
-        conn.execute("DELETE FROM cma_push_configs")
     runtime = ControllerRuntimeRepository(config)
     provider = FakeCmaProvider()
     pending = FilePendingInputStore(tmp_path)
@@ -476,7 +460,6 @@ async def test_normal_composition_delivers_push_without_manual_dispatch(
             ),
         )
         monkeypatch.setenv("CMA_A2A_BASE_URL", CONTROLLER_URL)
-        monkeypatch.setattr(controller_app, "_MAINTENANCE_INTERVAL_SECONDS", 0.2)
         controller = controller_app.production_app()
         composition = controller.state.controller_composition
         assert composition.service.push_trigger is composition.scheduler.push_trigger
@@ -493,7 +476,7 @@ async def test_normal_composition_delivers_push_without_manual_dispatch(
             client = A2AControllerClient(
                 AgentRegistry([AgentRegistration("cma", CONTROLLER_URL)]), controller_http
             )
-            sink = create_sink(EventSinkRepository(threads), client, bus)
+            sink = create_sink(threads, client.registry, bus)
             async with httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=sink), base_url="http://a2a-event-sink.test"
             ) as receiver:
@@ -506,14 +489,10 @@ async def test_normal_composition_delivers_push_without_manual_dispatch(
                     )
                     task = await control.send_turn(thread_id, str(uuid.uuid4()), "normal composition")
                     for _ in range(150):
-                        binding = threads.get_task_binding("cma", task.id)
-                        if (
-                            binding
-                            and binding["last_seen_task_state"] == "COMPLETED"
-                            and any(
-                                event["detail-type"] == "A2ATaskUpdated"
-                                for event in bus.snapshot()["pending"]
-                            )
+                        if any(
+                            event["detail"]["taskId"] == task.id
+                            and event["detail"].get("taskState") == "COMPLETED"
+                            for event in bus.snapshot()["pending"]
                         ):
                             break
                         await asyncio.sleep(0.02)
@@ -528,25 +507,24 @@ async def test_normal_composition_delivers_push_without_manual_dispatch(
                     assert push_trigger is not None
                     original_schedule = push_trigger.schedule_context
 
-                    def drop_ordinary_wakeup(context_id: str, reason: str) -> None:
-                        if reason == "push-maintenance":
-                            original_schedule(context_id, reason)
+                    def drop_ordinary_wakeup(context_id: str, reason: str, delay_seconds: int = 0) -> None:
+                        pass
 
                     monkeypatch.setattr(push_trigger, "schedule_context", drop_ordinary_wakeup)
-                    later = await control.send_turn(thread_id, str(uuid.uuid4()), "lost push wakeup")
+                    later_thread = str(threads.create_thread(config.dev_principal_id, "cma")["thread_id"])
+                    later = await control.send_turn(later_thread, str(uuid.uuid4()), "lost push wakeup")
+                    assert not any(
+                        event["detail"]["taskId"] == later.id for event in bus.snapshot()["pending"]
+                    )
+                    monkeypatch.setattr(push_trigger, "schedule_context", original_schedule)
+                    admin = ControllerAdmin(runtime, composition.scheduler_trigger, push_trigger)
+                    admin.retry_push(later.id, "app-control-plane")
                     for _ in range(150):
-                        binding = threads.get_task_binding("cma", later.id)
-                        if (
-                            binding
-                            and binding["last_seen_task_state"] == "WORKING"
-                            and any(
-                                event["detail"]["taskId"] == later.id for event in bus.snapshot()["pending"]
-                            )
-                        ):
+                        if any(event["detail"]["taskId"] == later.id for event in bus.snapshot()["pending"]):
                             break
                         await asyncio.sleep(0.02)
                     else:
-                        raise AssertionError("Periodic maintenance did not recover a lost push wakeup")
+                        raise AssertionError("Explicit recovery did not deliver the lost wakeup")
 
 
 @pytest.mark.asyncio
@@ -664,3 +642,162 @@ async def test_concurrent_first_turns_share_one_context(components) -> None:
             ).fetchone()
             assert count is not None and count["total"] == 1
         assert len(runtime.list_tasks(first.context_id)) == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_enqueue_failure_and_exhaustion_need_no_scan(components, monkeypatch):
+    config, runtime, provider, service, scheduler, trigger, _ = components
+    from managed_agents_app.cma_controller.push_config import PushConfigService
+
+    repo = PushRepository(runtime)
+    configs = PushConfigService(repo, SINK_URL, trigger)
+    task = await service.send(message("retry without scan"))
+    await scheduler.run_once(task.context_id)
+    config_wire = a2a.TaskPushNotificationConfig(task_id=task.id, id="retry", url=SINK_URL)
+    calls = 0
+    status = 503
+
+    async def callback(request):
+        nonlocal calls
+        calls += 1
+        assert request.method == "POST"
+        assert request.headers["Content-Type"] == "application/a2a+json"
+        return httpx.Response(status)
+
+    real_schedule = trigger.schedule_context
+
+    def fail_enqueue(*args):
+        raise RuntimeError("queue unavailable")
+
+    monkeypatch.setattr(trigger, "schedule_context", fail_enqueue)
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        await configs.create(config_wire)
+    assert repo.get(task.id, "retry") is not None
+    monkeypatch.setattr(trigger, "schedule_context", real_schedule)
+    await configs.create(config_wire)
+    assert len(repo.list_configs(task.id)) == 1
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(callback)) as http:
+        dispatcher = PushDispatcher(repo, service, trigger, http)
+        monkeypatch.setattr(trigger, "schedule_context", fail_enqueue)
+        with pytest.raises(RuntimeError, match="queue unavailable"):
+            await dispatcher.run_context(task.context_id)
+        assert calls == 1 and repo.get(task.id, "retry")["attempt_count"] == 1
+        monkeypatch.setattr(trigger, "schedule_context", real_schedule)
+        await dispatcher.run_context(task.context_id)
+        assert calls == 1, "Early SQS redelivery must respect the stored retry time"
+        assert trigger.pending[-1][:2] == (task.context_id, "push-retry")
+        assert 1 <= trigger.pending[-1][2] <= 5
+        for expected_delay in (15, 30, 60, 120, 300, None):
+            with connect(config) as conn:
+                conn.execute(
+                    "UPDATE cma_push_configs SET next_attempt_at = CURRENT_TIMESTAMP - "
+                    "INTERVAL '1 second' WHERE task_id = %s",
+                    (task.id,),
+                )
+            before = len(trigger.pending)
+            await dispatcher.run_context(task.context_id)
+            if expected_delay is not None:
+                assert trigger.pending[-1] == (task.context_id, "push-retry", expected_delay)
+            else:
+                assert len(trigger.pending) == before
+        assert calls == 7
+        assert repo.get(task.id, "retry")["permanent_failure_at"] is not None
+        await dispatcher.run_context(task.context_id)
+        assert calls == 7
+        status = 204
+        ControllerAdmin(runtime, LocalSchedulerTrigger(), trigger).retry_push(task.id, "retry")
+        await dispatcher.run_context(task.context_id)
+        assert repo.get(task.id, "retry")["last_delivered_at"]
+        assert calls == 8 and provider.create_calls == 1 and provider.send_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_tombstone_does_not_wait_for_inflight_callback(components):
+    _, runtime, _, service, _, trigger, _ = components
+    from managed_agents_app.cma_controller.push_config import PushConfigService
+
+    repo = PushRepository(runtime)
+    configs = PushConfigService(repo, SINK_URL, trigger)
+    task = await service.send(message("delete while callback is in flight"))
+    config = a2a.TaskPushNotificationConfig(task_id=task.id, id="delete", url=SINK_URL)
+    await configs.create(config)
+    started, finish = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def callback(_request):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await finish.wait()
+        return httpx.Response(204)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(callback)) as http:
+        dispatcher = PushDispatcher(repo, service, trigger, http)
+        pending = asyncio.create_task(dispatcher.run_context(task.context_id))
+        try:
+            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(configs.delete(task.id, "delete"), 1)
+            with pytest.raises(TaskNotFoundError):
+                await configs.get(task.id, "delete")
+            assert not (await configs.list(task.id, 50, "")).configs
+            with pytest.raises(InvalidParamsError):
+                await configs.create(config)
+        finally:
+            finish.set()
+            await pending
+        await dispatcher.run_context(task.context_id)
+        assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_delivered_terminal_wakeups_do_not_requeue_but_changed_snapshot_does(components, monkeypatch):
+    from managed_agents_app.cma_controller.push_config import PushConfigService
+    from managed_agents_app.cma_controller.task_view import TaskViewOptions
+
+    _, runtime, provider, service, scheduler, trigger, _ = components
+    repo = PushRepository(runtime)
+    task = await service.send(message("terminal duplicate wakeup"))
+    await scheduler.run_once(task.context_id)
+    configs = PushConfigService(repo, SINK_URL, trigger)
+    await configs.create(a2a.TaskPushNotificationConfig(task_id=task.id, id="terminal", url=SINK_URL))
+    deliveries = []
+
+    def callback(request):
+        deliveries.append(request.content)
+        return httpx.Response(204)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(callback)) as http:
+        dispatcher = PushDispatcher(repo, service, trigger, http)
+        await dispatcher.run_context(task.context_id)
+        trigger.pending.clear()
+        claim = repo.claim(task.id, "terminal")
+        assert claim
+        try:
+            # Overlapping workers must not perpetuate wakeups for an acknowledged snapshot.
+            await asyncio.gather(*(dispatcher.run_context(task.context_id) for _ in range(5)))
+            assert trigger.pending == []
+            assert len(deliveries) == 1
+            current = await service.get_task(task.id, options=TaskViewOptions(history_length=1))
+            current.history.add(
+                message_id="canonical-correction",
+                role=a2a.Role.ROLE_AGENT,
+                parts=[a2a.Part(text="Corrected canonical answer")],
+            )
+
+            async def changed_snapshot(*args, **kwargs):
+                return current
+
+            monkeypatch.setattr(service, "get_task", changed_snapshot)
+            await dispatcher.run_context(task.context_id)
+            assert len(trigger.pending) == 1
+            assert trigger.pending[0][:2] == (task.context_id, "push-retry")
+            assert 1 <= trigger.pending[0][2] <= 30
+        finally:
+            repo.release(task.id, "terminal", claim)
+        trigger.pending.clear()
+        await dispatcher.run_context(task.context_id)
+        assert len(deliveries) == 2
+        await dispatcher.run_context(task.context_id)
+        assert not trigger.pending and len(deliveries) == 2
+        assert provider.create_calls == 1 and provider.send_calls == 0

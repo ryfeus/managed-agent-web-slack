@@ -20,14 +20,16 @@ grant table DML privileges. Deployed Lambdas retain only `dsql:DbConnect`, never
 `DbConnectAdmin`.
 
 The Aurora DSQL Psycopg connector generates IAM authentication tokens and requires
-TLS with `sslmode=require`; no database password exists.
+TLS with `sslmode=require`; no database password exists. The TypeScript Web Function uses the official Aurora DSQL postgres.js connector with certificate validation. Its new IAM role must be granted the existing `app_runtime` database role before cutover; Terraform IAM `dsql:DbConnect` alone is insufficient. Phase 5 adds no tables, columns or transcript store.
+
+The Phase 6 Slack preview execution role also needs an explicit `AWS IAM GRANT app_runtime` before enabling its queue mapping. Use Terraform's `dsql_runtime_role_arns` output as the role source. IAM `dsql:DbConnect` alone does not authorize the database role. This worker shares the existing projection claim fields and adds no tables or columns. The shared `app_runtime` role retains broad application DML; the small worker repository limits itself to metadata reads and fenced projection claims, not a separate SQL security boundary.
 
 ## Schema
 
 The schema contains principals, external identity mappings, application threads,
-surface bindings, A2A Task bindings, ingress state, projection receipts, feedback
-metadata, controller contexts/Tasks, and push state. Migration 008 removes the
-six legacy application session tables. It contains no Claude or Slack transcript;
+surface bindings, A2A Task bindings, ingress state, projection receipts, controller
+contexts/Tasks, review digests/rulings and push state. Historical feedback metadata
+is retained but no longer written by the product. It contains no Claude or Slack transcript;
 pending human input is referenced only by opaque temporary-object keys.
 
 ## Commands
@@ -46,3 +48,5 @@ npm run db:map-slack -- --team-id T01234567 --user-id U01234567
 `db:map-slack` maps the verified workspace and human member IDs from a signed
 Slack event to an application principal. It does not make optional development
 allowlists into authorization credentials.
+
+See the [DSQL IAM runbook](../knowledge/areas/aurora-dsql-iam-operations.md) for roles, TLS and transaction retries.

@@ -1,0 +1,14 @@
+{
+  "name": "@managed-agents/slack-preview",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": { "typecheck": "tsc --noEmit" },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "3.1161.0",
+    "@aws/aurora-dsql-postgresjs-connector": "0.3.1",
+    "@managed-agents/preview": "0.1.0",
+    "postgres": "3.4.7"
+  }
+}

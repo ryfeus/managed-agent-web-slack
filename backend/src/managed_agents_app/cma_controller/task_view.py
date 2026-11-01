@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,7 +53,14 @@ def _message(task: dict[str, Any], event: dict[str, Any]) -> a2a.Message:
 def _pending_message(
     task: dict[str, Any], events: list[dict[str, Any]], requests: list[dict[str, Any]]
 ) -> a2a.Message | None:
-    pending = [row for row in requests if row["status"] != "resolved"]
+    if task.get("cancel_requested_at"):
+        return None
+    pending = [
+        row
+        for row in requests
+        if (row["status"] != "resolved" and row.get("kind") == "clarification")
+        or (row["status"] == "pending" and row.get("review_description") and not row.get("human_ruling"))
+    ]
     if not pending:
         return None
     by_id = {str(event.get("id")): event for event in events}
@@ -61,20 +69,23 @@ def _pending_message(
         source = by_id.get(str(row["cma_event_id"]))
         if source is None:
             continue
-        if row.get("kind") == "clarification":
-            tool_input = source.get("input") or {}
+        tool_input = source.get("input") or {}
+        if row["kind"] == "tool_approval":
             payloads.append(
-                ClarificationRequest(
+                ToolApprovalRequest(
                     request_id=str(row["request_id"]),
-                    prompt=str(tool_input["prompt"]),
-                    choices=tool_input.get("choices"),
+                    tool=ToolDescriptor(name=str(source["name"]), arguments=tool_input),
+                    message=str(row["review_description"]),
                 ).model_dump(by_alias=True, exclude_none=True)
             )
-        else:
-            tool = ToolDescriptor(name=str(source.get("name") or "tool"), arguments=source.get("input") or {})
-            payloads.append(
-                ToolApprovalRequest(request_id=str(row["request_id"]), tool=tool).model_dump(by_alias=True)
-            )
+            continue
+        payloads.append(
+            ClarificationRequest(
+                request_id=str(row["request_id"]),
+                prompt=str(tool_input["prompt"]),
+                choices=tool_input.get("choices"),
+            ).model_dump(by_alias=True, exclude_none=True)
+        )
     if not payloads:
         return None
     message = a2a.Message(
@@ -82,7 +93,7 @@ def _pending_message(
         context_id=str(task["context_id"]),
         task_id=str(task["task_id"]),
         role=a2a.Role.ROLE_AGENT,
-        parts=[a2a.Part(text="Approval required")],
+        parts=[a2a.Part(text="Human input required")],
         extensions=[HUMAN_INPUT_EXTENSION_URI],
     )
     message.metadata.update({HUMAN_INPUT_EXTENSION_URI: {"requests": payloads}})
@@ -134,13 +145,23 @@ def build_task(
                 result.status.message.CopyFrom(message)
                 break
     elif state == a2a.TaskState.TASK_STATE_INPUT_REQUIRED:
+        # Push clients need to notice renewed reviews even without the human-input
+        # extension. Only opaque request identity enters this notification marker.
+        pending_ids = sorted(
+            str(row["request_id"])
+            for row in requests
+            if (row.get("kind") == "clarification" and row["status"] != "resolved")
+            or (row.get("review_digest") and row["status"] == "pending" and not row.get("human_ruling"))
+        )
+        revision = hashlib.sha256("\0".join(pending_ids).encode()).hexdigest()[:16]
         pending_message = _pending_message(task, events, requests) if options.human_input_enabled else None
         if pending_message:
+            pending_message.message_id += "-" + revision
             result.status.message.CopyFrom(pending_message)
         else:
             result.status.message.CopyFrom(
                 a2a.Message(
-                    message_id=f"input-{task['task_id']}",
+                    message_id=f"input-{task['task_id']}-{revision}",
                     context_id=str(task["context_id"]),
                     task_id=str(task["task_id"]),
                     role=a2a.Role.ROLE_AGENT,

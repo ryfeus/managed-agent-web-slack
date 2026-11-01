@@ -28,12 +28,12 @@ EXCLUDED_PREFIXES = (
     "playwright-report-production/",
     "test-results/",
 )
-EXCLUDED_PARTS = {"__pycache__"}
+EXCLUDED_PARTS = {"__pycache__", "node_modules", ".venv", ".next", ".terraform", "out"}
 
 
 def is_exported_path(relative: Path) -> bool:
     posix = relative.as_posix()
-    if (posix == ".env" or posix.startswith(".env.")) and posix != ".env.example":
+    if (relative.name == ".env" or relative.name.startswith(".env.")) and relative.name != ".env.example":
         return False
     if posix.startswith(EXCLUDED_PREFIXES) or EXCLUDED_PARTS.intersection(relative.parts):
         return False
@@ -65,6 +65,8 @@ def export_tree(root: Path, output: Path) -> list[Path]:
     exported: list[Path] = []
     for relative in sorted(path for path in tracked_paths(source) if is_exported_path(path)):
         source_file = source / relative
+        if source_file.is_symlink():
+            raise ValueError(f"refusing to export symlink: {relative}")
         if not source_file.is_file():
             continue
         target = output / relative

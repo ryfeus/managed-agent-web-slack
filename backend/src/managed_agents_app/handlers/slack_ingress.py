@@ -13,7 +13,6 @@ from managed_agents_app.slack import (
     normalize_interaction,
     verify_slack_signature,
 )
-from managed_agents_app.slack.normalize import ModalOpenRequest
 
 
 def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
@@ -50,11 +49,6 @@ def handle_request(runtime: Runtime, event: dict[str, Any]) -> dict[str, Any]:
                 callback_id=payload.get("callback_id") or (payload.get("view") or {}).get("callback_id"),
             )
             normalized = normalize_interaction(payload, body)
-            if isinstance(normalized, ModalOpenRequest):
-                if not config.slack_bot_token:
-                    return response(503, {"error": "Slack bot token is not configured"})
-                runtime.slack.open_denial_modal(normalized.trigger_id, normalized.metadata)
-                return response(200, {"ok": True})
         else:
             payload = json.loads(body)
             if payload.get("type") == "url_verification" and isinstance(payload.get("challenge"), str):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from copy import deepcopy
 from typing import Any
@@ -16,7 +15,7 @@ class FakeCmaProvider:
     def __init__(self) -> None:
         self.sessions: dict[str, SessionSummary] = {}
         self.events: dict[str, list[dict[str, Any]]] = {}
-        self.listeners: dict[str, list[asyncio.Queue[dict[str, Any]]]] = {}
+        self.stream_calls = 0
         self.create_calls = 0
         self.send_calls = 0
         self.confirm_calls = 0
@@ -58,8 +57,6 @@ class FakeCmaProvider:
         item = deepcopy(event)
         item.setdefault("id", self._id("evt"))
         self.events[session_id].append(item)
-        for listener in self.listeners.get(session_id, []):
-            listener.put_nowait(deepcopy(item))
         if item["type"] == "session.status_idle":
             self.sessions[session_id].status = "idle"
         elif item["type"] == "session.status_running":
@@ -193,11 +190,6 @@ class FakeCmaProvider:
             self.lose_interrupt_response = False
             raise TimeoutError("interrupt response lost")
 
-    async def stream_events(self, session_id: str) -> AsyncIterator[dict[str, Any]]:
-        listener: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        self.listeners.setdefault(session_id, []).append(listener)
-        try:
-            while True:
-                yield await listener.get()
-        finally:
-            self.listeners[session_id].remove(listener)
+    def stream_events(self, session_id: str) -> AsyncIterator[dict[str, Any]]:
+        self.stream_calls += 1
+        raise AssertionError("CMA SSE is P1-only")

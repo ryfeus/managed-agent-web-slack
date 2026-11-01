@@ -1,0 +1,47 @@
+[policy]
+version = 2
+
+[policy.deployment]
+dispatch = "enforced"
+# CMA pauses these calls before dispatch; this hook runtime never admits inference responses.
+provider_run_tools = []
+context_control = false
+confined_results = []
+
+[[policy.tool]]
+name = "host/cma/web_fetch"
+delta = {}
+
+[[policy.tool]]
+name = "host/cma/web_search"
+requires = { attention = ["user-approval"] }
+delta = {}
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+# OpenAPPA requires an annotator for wildcard contracts. This annotator emits
+# only the reserved, ungrantable blocked requirement; OpenAPPA enforces it.
+[[policy.annotator]]
+name = "deny-undeclared"
+ranks = []
+audiences = []
+marks = ["blocked"]
+effects = []
+
+[[policy.tool]]
+name = "*"
+annotator = "deny-undeclared"
+
+[externals.annotators.deny-undeclared]
+command = ["@openappa-cma", "--annotate-blocked"]
+
+[[policy.authority]]
+name = "user"
+hint = "Ask the user to approve this exact tool call."
+[policy.authority.permits]
+attention = ["user-approval"]
+
+[externals.authorities.user]
+builtin = "hitl"

@@ -1,5 +1,5 @@
 import { expect, type APIRequestContext } from '@playwright/test';
-export const backend = 'http://127.0.0.1:3001';
+export const backend = process.env.E2E_BACKEND_URL || 'http://127.0.0.1:3001';
 export async function control(api: APIRequestContext, path: string, data: object = {}) {
     const response = await api.post(`${backend}/_test/${path}`, { data, timeout: 30000 });
     expect(response.ok(), await response.text()).toBeTruthy();

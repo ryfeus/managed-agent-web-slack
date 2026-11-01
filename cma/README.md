@@ -47,3 +47,10 @@ Environments are selected by ID, **not pinned by version**. Updating an environm
 may affect subsequent sessions even before AWS rollout; agent rollback does not
 roll it back. Revert environment source, review/apply, and validate new sessions.
 Webhook registration and signing secrets remain separate operational work.
+
+The application agent declares custom `ask_user` with one required string `prompt`.
+The controller returns clarification answers as custom tool results; permission
+requests use native OpenAPPA automatic decisions or policy-required human review. Genuine Slack clarification acceptance
+uses the linked authenticated web continuation API, because native Slack clarification
+response controls are currently unsupported. `RUN_LIVE_E2E=1 npm run test:live -- all` includes
+clarification answer and explicit Stop checks.

@@ -1,43 +1,47 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { test, expect } from '@playwright/test';
+import { createLiveSlackClient } from '../helpers/live-slack';
 
-// A genuine user-token mention exercises Slack delivery. The bot token reads the
-// approval; the signed interaction fixture exercises the same ingress as Allow.
-// This checks Slack's returned visible blocks, not a Slack client's button UI.
-test('live Slack tool approval renders the final answer in the thread', async ({ request }) => {
+// Genuine Slack user-token delivery. OpenAPPA owns the decision; no interaction fixture.
+// Run deny with a separately deployed policy omitting web_search and a fresh context.
+test('live Slack tool is automatically decided and renders one final answer', async ({ request }) => {
     const env = process.env;
-    expect(env.SLACK_USER_TOKEN, 'SLACK_USER_TOKEN is required for genuine Slack delivery').toBeTruthy();
     const base = env.E2E_LIVE_BASE_URL!;
     const channel = env.E2E_LIVE_SLACK_CHANNEL_ID!;
     const team = env.E2E_LIVE_SLACK_TEAM_ID!;
     const user = env.E2E_LIVE_SLACK_USER_ID!;
+    const tool = env.E2E_LIVE_POLICY_TOOL || 'web_fetch';
+    const decision = env.E2E_LIVE_POLICY_DECISION || 'allow';
+    expect(['web_fetch', 'web_search']).toContain(tool);
+    expect(['allow', 'deny']).toContain(decision);
     const intervals = [1000, 2000, 5000];
-    async function slack(method: string, data: Record<string, string | number>, token = env.SLACK_BOT_TOKEN!) {
-        const response = await request.post(`https://slack.com/api/${method}`, {
-            headers: { authorization: `Bearer ${token}` }, form: data,
-        });
-        const result = await response.json();
-        expect(result.ok, result.error).toBe(true);
-        return result;
-    }
+    const slack = createLiveSlackClient(request, env);
     const bot = await slack('auth.test', {});
-    const human = await slack('auth.test', {}, env.SLACK_USER_TOKEN!);
+    const human = await slack('auth.test', {}, 'user');
     expect(bot.team_id).toBe(team);
     expect(human.team_id).toBe(team);
     expect(human.user_id).toBe(user);
     const login = await request.post(`${base}/api/auth/session`, { data: { accessToken: env.WEB_ACCESS_TOKEN } });
     expect(login.ok()).toBe(true);
-    const marker = `APPROVAL_VISIBLE_${randomUUID()}`;
+    const marker = `POLICY_VISIBLE_${randomUUID()}`;
+    const action = tool === 'web_fetch' ? 'fetch https://example.com' : 'search for example.com';
     const root = await slack('chat.postMessage', {
         channel,
-        text: `<@${bot.user_id}> Use web_fetch exactly once to fetch https://example.com. After approval and successful fetch, reply with a brief summary followed by ${marker}. Do not use other tools.`,
-    }, env.SLACK_USER_TOKEN!);
-    console.log(JSON.stringify({ marker, channel, thread_ts: root.ts }));
-    function inspect(): any {
+        text: `<@${bot.user_id}> Use ${tool} exactly once to ${action}. After the tool succeeds or is denied, reply with a brief description of that outcome followed by ${marker}. If denied, do not retry or use another tool. Do not ask me for approval.`,
+    }, 'user');
+    const progress: Record<string, unknown> = { run_id: env.E2E_RUN_ID, channel, thread_ts: root.ts };
+    const recordProgress = () => {
+        console.log(JSON.stringify(progress));
+        if (env.E2E_RUN_METADATA) writeFileSync(env.E2E_RUN_METADATA, JSON.stringify(progress));
+    };
+    recordProgress();
+    function inspect(provider = false): any {
         return JSON.parse(execFileSync('uv', [
             'run', '--directory', 'backend', 'python', '../scripts/live_a2a_inspect.py',
             '--team-id', team, '--channel-id', channel, '--thread-ts', root.ts,
+            ...(provider ? ['--provider-evidence'] : []),
         ], { encoding: 'utf8', timeout: 30000, env: { ...env, PYTHONDONTWRITEBYTECODE: '1' } }));
     }
     async function replies(): Promise<any[]> {
@@ -50,67 +54,34 @@ test('live Slack tool approval renders the final answer in the thread', async ({
             (key === 'text' || key === 'markdown_text') && typeof item === 'string'
                 ? item : visibleText(item)).join('\n');
     }
-    function answerText(message: any): string {
-        return message.blocks?.length ? visibleText(message.blocks) : message.text || '';
-    }
-    let approval: any;
-    await expect.poll(async () => {
-        approval = (await replies()).find(m => m.user === bot.user_id && m.blocks?.some((b: any) =>
-            b.elements?.some((e: any) => e.action_id === 'agent_tool_allow')));
-        return Boolean(approval);
-    }, { intervals }).toBe(true);
-    const action = approval.blocks.flatMap((b: any) => b.elements || [])
-        .find((e: any) => e.action_id === 'agent_tool_allow');
-    const ids = JSON.parse(action.value);
-    const before = inspect();
-    expect(before.tasks).toHaveLength(1);
-    expect(before.tasks[0].task_id).toBe(ids.taskId);
-    expect(before.tasks[0].controller_state).toBe('INPUT_REQUIRED');
-    const threadId = before.binding.thread_id;
-    async function history(): Promise<any> {
-        const response = await request.get(`${base}/api/agui/threads/${threadId}/history`);
-        expect(response.ok()).toBe(true);
-        return response.json();
-    }
-    // Independently inspect the complete controller-derived input before allowing it.
-    const pending = await history();
-    expect(pending.activeTaskId).toBe(ids.taskId);
-    const tools = pending.messages.flatMap((m: any) => m.toolCalls || []);
-    expect(tools).toHaveLength(1);
-    expect(tools[0].id).toBe(ids.requestId);
-    expect(tools[0].function.name).toBe('web_fetch');
-    expect(JSON.parse(tools[0].function.arguments)).toEqual({ url: 'https://example.com' });
-    const payload = {
-        type: 'block_actions', team: { id: team }, user: { id: user }, channel: { id: channel },
-        message: { ts: approval.ts, thread_ts: root.ts },
-        actions: [{ action_id: 'agent_tool_allow', value: action.value }],
-    };
-    const raw = new URLSearchParams({ payload: JSON.stringify(payload) }).toString();
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const signature = createHmac('sha256', env.SLACK_SIGNING_SECRET!)
-        .update(`v0:${timestamp}:${raw}`).digest('hex');
-    const allowed = await request.post(`${base}/slack/interactions`, { data: raw, headers: {
-        'content-type': 'application/x-www-form-urlencoded',
-        'x-slack-request-timestamp': timestamp, 'x-slack-signature': `v0=${signature}`,
-    } });
-    expect(allowed.ok()).toBe(true);
-    await expect.poll(() => inspect().tasks[0].controller_state, { intervals }).toBe('COMPLETED');
+    const answerText = (m: any): string => m.blocks?.length ? visibleText(m.blocks) : m.text || '';
+    await expect.poll(() => inspect().tasks[0]?.controller_state, { intervals }).toBe('COMPLETED');
+    const after = inspect(true);
+    expect(after.provider_evidence).toHaveLength(1);
+    expect(after.provider_evidence[0]).toMatchObject({tool_name:tool,confirmation_decisions:[decision]});
+    expect(after.provider_evidence[0].result_event_types).toContain('agent.tool_result');
+    expect(after.provider_evidence[0].result_errors).toEqual([decision === 'deny']);
+    expect(after.tasks).toHaveLength(1);
+    const task = after.tasks[0];
+    progress.task_id = task.task_id;
+    progress.thread_id = after.binding.thread_id;
+    recordProgress();
+    expect(task.input_requests).toHaveLength(1);
+    expect(task.input_requests[0]).toMatchObject({status: 'resolved', decision});
+    expect(task.input_requests[0].confirmation_attempted_at).toBeTruthy();
+    await expect.poll(() => inspect().tasks[0]?.projection_status, { intervals }).toBe('completed');
     const visibleAnswers = async () => (await replies()).filter(m =>
         m.ts !== root.ts && m.user === bot.user_id && answerText(m).includes(marker));
     await expect.poll(async () => (await visibleAnswers()).length, { intervals }).toBe(1);
     const [answer] = await visibleAnswers();
     expect(answerText(answer).split(marker)).toHaveLength(2);
-    expect(answer.blocks.some((b: any) => b.type === 'context_actions')).toBe(true);
-    expect((await replies()).find(m => m.ts === approval.ts)?.text).toContain('Allowed by');
-    await expect.poll(async () => (await history()).messages.filter((m: any) =>
-        m.role === 'assistant' && m.content?.includes(marker)).length, { intervals }).toBe(1);
-    const after = inspect();
-    expect(after.tasks).toHaveLength(1);
-    expect(after.tasks[0].task_id).toBe(ids.taskId);
-    expect(after.tasks[0].projection_status).toBe('completed');
-    expect(after.tasks[0].input_requests).toEqual([
-        expect.objectContaining({ request_id: ids.requestId, status: 'resolved', decision: 'allow' }),
-    ]);
-    console.log(JSON.stringify({ thread_id: threadId, task_id: ids.taskId, response_ts: answer.ts,
-        block_types: answer.blocks.map((b: any) => b.type), visible_answer_count: 1 }));
+    expect(JSON.stringify(await replies())).not.toContain('agent_tool_allow');
+    const history = await request.get(`${base}/api/agui/threads/${after.binding.thread_id}/history`);
+    expect(history.ok()).toBe(true);
+    const canonical = await history.json();
+    expect(canonical.messages.flatMap((m: any) => m.toolCalls || [])).toHaveLength(0);
+    expect(canonical.messages.filter((m: any) => m.role === 'assistant' && m.content?.includes(marker))).toHaveLength(1);
+    console.log(JSON.stringify({thread_id: after.binding.thread_id, task_id: task.task_id,
+        response_ts: answer.ts, policy_decision: decision, visible_answer_count: 1,
+        confirmation_attempted_at: task.input_requests[0].confirmation_attempted_at, provider_evidence: after.provider_evidence}));
 });

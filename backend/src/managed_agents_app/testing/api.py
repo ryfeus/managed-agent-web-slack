@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
 from typing import Annotated, Any, cast
 
 from fastapi import APIRouter, Body
 from psycopg import sql
 
 from managed_agents_app.db.connection import connect
+from managed_agents_app.policy.openappa import OpenAppaPolicyEngine
 from managed_agents_app.runtime import Runtime
 from managed_agents_app.testing.factory import LocalA2AHarness, validate_local_database
 from managed_agents_app.testing.faults import FaultInjector
@@ -25,8 +28,6 @@ TABLES = (
     "cma_input_requests",
     "cma_clarification_requests",
     "cma_push_configs",
-    "a2a_task_event_receipts",
-    "a2a_task_observation_claims",
     "surface_ingress_events",
     "slack_task_projections",
     "slack_projection_items",
@@ -43,11 +44,24 @@ def router(runtime: Runtime) -> APIRouter:
     faults = cast(FaultInjector, runtime.faults)
     harness = cast(LocalA2AHarness, runtime.local_a2a)
 
+    @api.get("/instance")
+    def instance() -> dict[str, Any]:
+        with connect(runtime.config) as conn:
+            seeded = (
+                conn.execute(
+                    "SELECT 1 FROM external_identities WHERE provider = 'slack' "
+                    "AND tenant_id = 'T001' AND external_user_id = 'U001'"
+                ).fetchone()
+                is not None
+            )
+        return {"instance_id": os.getenv("LOCAL_INSTANCE_ID", ""), "seeded": seeded}
+
     @api.post("/reset")
     def reset() -> dict[str, bool]:
         validate_local_database(runtime.config)
         faults.reset()
         harness.reset()
+        runtime.slack_preview_trigger = None
         bus.reset()
         queue.reset()
         slack.reset()
@@ -78,6 +92,17 @@ def router(runtime: Runtime) -> APIRouter:
             "database": database,
             "faults": faults.snapshot(),
         }
+
+    @api.post("/policy")
+    def policy(body: Annotated[dict[str, Any], Body()]) -> dict[str, bool]:
+        name = body.get("fixture")
+        if name not in {"baseline", "human-review"}:
+            raise ValueError("Unknown local policy fixture")
+        path = Path(__file__).resolve().parents[4] / "services/openappa/tests" / (name + ".toml")
+        harness.composition.scheduler.policy_engine = OpenAppaPolicyEngine(
+            runtime.config.openappa_binary_path, str(path)
+        )
+        return {"ok": True}
 
     @api.post("/a2a/script")
     def script(body: Annotated[dict[str, Any], Body()]) -> dict[str, bool]:

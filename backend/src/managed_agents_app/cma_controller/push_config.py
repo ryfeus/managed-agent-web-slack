@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
-from contextlib import suppress
 from urllib.parse import urlsplit, urlunsplit
 
 from a2a.types import a2a_pb2 as a2a
@@ -77,9 +76,8 @@ class PushConfigService:
             raise InvalidParamsError(str(error)) from error
         task = await asyncio.to_thread(self.repository.runtime.get_task, resolved_task_id)
         assert task is not None
-        # Maintenance reconstructs current state if enqueue is lost.
-        with suppress(Exception):
-            self.trigger.schedule_context(str(task["context_id"]), "push-config-created")
+        # A failed enqueue is retryable through the same idempotent config creation.
+        self.trigger.schedule_context(str(task["context_id"]), "push-config-created")
         return self._wire(row)
 
     async def get(self, task_id: str, config_id: str) -> a2a.TaskPushNotificationConfig:
@@ -107,10 +105,4 @@ class PushConfigService:
         if await asyncio.to_thread(self.repository.runtime.get_task, task_id) is None:
             raise TaskNotFoundError()
         await asyncio.to_thread(self.repository.delete, task_id, config_id)
-        # A successful delete must outlive a callback already in flight.
-        for _ in range(160):
-            if await asyncio.to_thread(self.repository.deletion_settled, task_id, config_id):
-                await asyncio.to_thread(self.repository.purge_deleted, task_id, config_id)
-                return
-            await asyncio.sleep(0.1)
-        raise RuntimeError("Push delivery did not settle; retry deletion")
+        # The tombstone prevents new dispatches; an already-in-flight POST may finish.

@@ -54,6 +54,7 @@ def required_env(name: str, boundary: str = "configuration") -> str:
 class SlackApi:
     def __init__(self, client: httpx.Client) -> None:
         self.client = client
+        self.scopes_by_token: dict[str, set[str]] = {}
 
     def call(self, token: str, method: str, data: dict[str, str] | None = None) -> dict[str, Any]:
         try:
@@ -77,6 +78,9 @@ class SlackApi:
             raise SlackUserError(f"Slack {method} failed: {code}")
         if response.status_code >= 400:
             raise SlackUserError(f"Slack {method} failed: HTTP {response.status_code}")
+        scopes = response.headers.get("x-oauth-scopes")
+        if isinstance(scopes, str) and scopes:
+            self.scopes_by_token[token] = {scope.strip() for scope in scopes.split(",")}
         return result
 
     def auth(self, token: str) -> dict[str, Any]:
@@ -317,7 +321,7 @@ def wait_for_inspection(team_id: str, channel: str, root_ts: str, *, timeout: fl
 
 
 def smoke(api: SlackApi) -> dict[str, Any]:
-    report: dict[str, Any] = {"run_id": uuid4().hex[:12]}
+    report: dict[str, Any] = {"run_id": os.getenv("E2E_RUN_ID") or uuid4().hex[:12]}
     try:
         user_token = required_env("SLACK_USER_TOKEN", "user_auth")
         bot_token = required_env("SLACK_BOT_TOKEN", "bot_auth")
@@ -357,6 +361,11 @@ def smoke(api: SlackApi) -> dict[str, Any]:
             raise SmokeFailure("human_post", str(error)) from None
         root_ts = posted["thread_ts"]
         report["thread_ts"] = root_ts
+        print(
+            json.dumps({key: report[key] for key in ("run_id", "team_id", "channel_id", "thread_ts")}),
+            file=sys.stderr,
+            flush=True,
+        )
         wait_for_marker(api, user_token, channel, root_ts, first, human_id, agent_id, bot_id, team_id, 1)
         try:
             continuation = api.post(
@@ -380,7 +389,7 @@ def smoke(api: SlackApi) -> dict[str, Any]:
             application_thread_id=state["binding"]["thread_id"],
             context_id=state["binding"]["context_id"],
             task_ids=[task["task_id"] for task in state["tasks"]],
-            push_receipts=[task["push_receipts"] for task in state["tasks"]],
+            push_delivered=[task["push_delivered"] for task in state["tasks"]],
         )
         return report
     except SmokeFailure as error:

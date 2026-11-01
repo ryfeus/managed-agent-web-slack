@@ -1,189 +1,35 @@
-# Repository Agent Context
+# Repository agent context
 
-## Purpose and invariant
+## Invariants
 
-This repository implements a serverless web and Slack interface for Anthropic Managed Agents. Web and Slack continue the same application thread through controller-owned A2A Tasks. CMA provider session identity stays private to the controller.
+Web and Slack use authorized application threads and A2A Tasks. Only the private CMA controller mutates Anthropic sessions/events or owns canonical reconciliation. The isolated TypeScript preview worker may read disposable CMA SSE; its AppSync output is never authoritative. CMA owns canonical transcripts and execution; DSQL holds identity, routing, idempotency, leases, projection state and opaque temporary-object keys, never transcripts, message bodies, tool arguments/output, previews or reasoning.
 
-Preserve this architectural invariant:
+Read relevant implementation/tests before edits. Preserve Runtime/port composition; handlers do not construct provider clients. The active Task is the earliest nonterminal FIFO Task. Load canonical history before subscriptions and reconcile after closure; disconnect never cancels. Explicit Stop remains independent of policy.
 
-> Web and Slack operate on application threads and A2A Tasks. CMA/Anthropic owns canonical transcripts and execution behind the controller. Aurora DSQL stores only identity, authorization, routing, idempotency, projection state, and opaque temporary-object keys.
+Native OpenAPPA evaluates each approval in fresh memory. A single supported HITL offer may expose exact call/policy review to authorized Web/Slack surfaces. First authorized ruling wins; the scheduler reconstructs the native remedy, checks call/policy/authority fingerprint, and commits a fenced final decision before CMA confirmation. Changed consent rotates the request ID. Preserve uncertain-confirmation markers and fail closed for unsupported remedies/outages. No direct surface approval bypass.
 
-Do not add Claude messages, tool calls, reasoning, or transcript copies to DSQL.
+## Workflow
 
-## Repository map
+- `npm ci`, `uv sync --directory backend --locked`, and `npx playwright install chromium` are explicit setup.
+- `npm run dev` is foreground, credential-free PostgreSQL/fake-CMA/Slack-recorder development. Use printed URLs; Ctrl-C cleans up only its children/Compose project. Never read `.env` or inject live credentials into local runs.
+- Run `npm run check` during edits and `npm run verify:full` before completion. `npm run e2e -- --grep …` focuses Playwright after PostgreSQL checks. Run pinned `npm run secrets:check` as well.
+- Test behavior, including duplicates, failures and races when relevant. Preserve focused trust-boundary tests. Record material unresolved gaps in `docs/known-limitations.md`. Do not claim live compatibility from local fakes or silently skip failures.
+- Keep docs current and concise. No mandatory feature-contract template, JSON registry or custom checker framework. For knowledge edits keep immediate indexes and semantic log current.
 
-- `apps/web`: statically exported Next.js/assistant-ui frontend.
-- `apps/web/app/assistant.tsx`: assistant-ui AG-UI runtime and thread interface.
-- `backend/src/managed_agents_app/agui_bridge`: public cookie-authenticated AG-UI to private A2A bridge.
-- `backend/src/managed_agents_app/agent_control_plane`: application threads, A2A Task binding, and FIFO active-Task selection.
-- `backend/src/managed_agents_app/a2a_client`: private controller client.
-- `backend/src/managed_agents_app/cma_controller`: controller-private CMA session and execution adapter.
-- `backend/src/managed_agents_app`: Python 3.14 backend shared code and Lambda handlers.
-- `backend/migrations`: language-neutral DSQL schema migrations.
-- `backend/tests`: pytest unit and contract coverage.
-- `slack/manifest.template.yaml`: deployment-independent Agent View, event, interactivity, shortcut, and unfurl template.
-- `infra/bootstrap`: shared Terraform state-bucket bootstrap.
-- `infra/app`: application infrastructure and remote state configuration.
-- `scripts/deploy.sh`: validated build, Terraform apply, secret sync, DSQL migration/seed, and frontend upload.
-- `scripts/verify`: authoritative fast and full local verification entrypoint.
-- `docs/feature-contract-template.md`: behavioral contract template for substantial distributed changes.
-- `knowledge/known-limitations.json`: machine-checked correctness limitations and their executable tests.
-- `knowledge/persistence-schema-contract.json`: machine-checked inventory of migration-owned tables and columns.
-- `knowledge`: reusable operational knowledge and project acceptance runbooks; keep its immediate indexes and `knowledge/log.md` current when adding concepts.
+## AWS and deployment
 
-## AWS and Terraform
+Default region is `us-west-2`; preferred local SSO profile is `default` via `AWS_PROFILE`. Discover account with STS; `EXPECTED_AWS_ACCOUNT_ID` is an optional assertion. Use the AWS account/credentials/remote-state skills when applicable. Verify `aws sts get-caller-identity --profile "$AWS_PROFILE"` before apply and export concrete SSO credentials before direct Terraform/Python AWS use.
 
-- Region default: `us-west-2`; do not claim arbitrary-region support without validation.
-- Preferred local SSO profile: `default`, configured through `AWS_PROFILE`.
-- Discover the target account with STS. `EXPECTED_AWS_ACCOUNT_ID`, when set, is a safety assertion rather than a default.
-- Remote state is deployment-specific and rendered under `.generated/terraform/`; use `TF_STATE_BUCKET` to target an existing bucket.
-- Application Terraform root: `infra/app`.
-- Use the `aws-current-account`, `aws-terraform-credentials`, and `terraform-remote-state` skills when applicable.
-- Always verify `aws sts get-caller-identity --profile "$AWS_PROFILE"` before applying infrastructure.
-- With SSO, export concrete credentials before direct Terraform or Python AWS SDK operations. `scripts/deploy.sh` already does this correctly.
-- Use `./scripts/deploy.sh` for normal deployments; it validates required values, renders backend configuration, and syncs secrets after Terraform provisions their containers.
+Use `npm run cma:plan`, `npm run deploy:plan`, then explicit `npm run deploy`. Terraform outputs are authoritative; backend configuration lives under ignored `.generated/terraform/`; `TF_STATE_BUCKET` selects existing state. Preserve destructive-change review, DSQL deletion protection, versioned S3 Lambda artifacts and least privilege. Never automatically deploy or destroy resources during local work.
 
-Treat Terraform outputs as authoritative for application URLs, callbacks, DSQL endpoints, and resource IDs. Never commit generated deployment outputs.
+Only `cma/claude-lock.json` selects agent ID, exact version and environment ID. Serialize CMA applies, use ant >=1.30.0, retain/review partial lock updates and never force/prune automatically. Environment selection is ID-based, not version-pinned. `.env` secrets are local: never print, commit, copy into docs or Terraform state. Webhook signing keys sync only after registration.
 
-## Secrets and configuration
+## Slack trust and operations
 
-- Local secrets are in `.env`; never print, commit, or copy their values into documentation or Terraform state.
-- `.env.example` documents supported variables.
-- Deployment inputs include the Anthropic API key and web access/cookie secrets. Agent ID, exact version, and environment ID come exclusively from `cma/claude-lock.json`; manual IDs and `AGENT_ID` do not select deployment configuration.
-- CMA definitions and genuine lock state are committed under `cma/`. Use `npm run cma:plan` before normal deployment, which applies them with ant >= 1.30.0. Never automatically force/prune or discard partial lock updates. Serialize applies and review/commit lock changes.
-- The Anthropic webhook signing key is created when the webhook is registered and then synced to Secrets Manager.
-- `npm run secrets:sync` invokes the Python operation and derives each Secrets Manager region from its Terraform ARN.
+Keep Socket Mode disabled. Render/import the manifest and reinstall after scope changes; manifest text alone does not prove installed permissions. HMAC authenticates raw ingress; verified team/human identity must map through DSQL and own the thread. Optional allowlists are not credentials. Plain channel messages are accepted only in an owned bound thread. Exact local user-token bot/app metadata exceptions must match both configured IDs.
 
-## Slack trust and routing
+One baseline supports mentions/DMs, bound replies/linking, processing/reactions, chunk task cards with normal final-reply fallback, source links when `PUBLIC_APP_URL` is set, Stop and native review Allow/Deny. Clarification may be answered through Web. Never mix Slack text-mode and chunk-mode payloads. Working-state failures must not suppress/resubmit execution. Never project thinking.
 
-- Production delivery uses Slack's HTTP Events API. **Socket Mode must remain disabled** or Slack will route events to WebSocket instead of the AWS Request URL.
-- Render and import `.generated/slack-manifest.yaml` with `npm run slack:manifest`, keep Socket Mode disabled, and reinstall after scope or event changes.
-- The manifest subscribes to mentions, DMs/channel replies, Agent View lifecycle/context, stop, and shared links. Top-level channel messages are accepted only as `app_mention`; a plain channel message is accepted only when it is a reply to an existing DSQL binding.
-- Bot scopes are `assistant:write`, `chat:write`, `app_mentions:read`, `im:history`, `channels:history`, `groups:history`, `commands`, `links:read`, `links:write`, and `reactions:write`.
-- Reinstall the Slack app after importing any manifest change that adds a scope. A successful `reactions.add` call is the acceptance check for `reactions:write`; manifest text alone does not prove the installed token has the scope.
-- Authenticate ingress only with Slack's timestamped HMAC signature.
-- Derive `team_id` and the human `event.user` from the verified event, then resolve `(provider, tenant_id, external_user_id)` through DSQL `external_identities`.
-- `SLACK_TEAM_ID` and `SLACK_USER_ID` are optional development allowlist filters. They are not authentication credentials and should normally remain unset.
-- Add another verified identity with:
+Slack testing is API-only. Never ask a user to open Slack, log in, post prompts, click controls or inspect its UI. `RUN_LIVE_E2E=1 npm run test:live` performs read-only AWS/DSQL/deployment/token/identity preflight before genuine user-token delivery. The user token stays local and never enters Secrets Manager/Lambda. Report missing access with secret-safe diagnostics and distinguish signed fixtures from native UI acceptance. Local verification never triggers live tests automatically.
 
-  ```bash
-  export DSQL_ENDPOINT="$(terraform -chdir=infra/app output -raw dsql_endpoint)"
-  npm run db:map-slack -- --team-id T01234567 --user-id U01234567
-  ```
-
-  Run this with valid concrete AWS credentials and `AWS_REGION=us-west-2`.
-
-## Slack native working state
-
-- Emit `SlackWorkStarted` only after the ingress claim, identity authorization, command/text validation, and existing-binding ownership check succeed. Emit it before delivering input to Claude so Slack can show immediate `processing` state and an optional receipt reaction.
-- Treat working-state projection as asynchronous UX. Slack status, reaction, or permalink failures must not prevent the authorized Claude input from running; EventBridge retry and the target DLQ isolate projector failures.
-- Preserve the exact triggering `message_ts` separately from the thread root. Reactions and source permalinks belong to that exact message, including an unmentioned nested reply.
-- Slack streaming messages have one mode for their lifetime. Task-card streams start with `chunks`, append response text as `markdown_text` chunks, and stop with chunks. Do not mix the text-mode `markdown_text` request field with chunk mode.
-- Start a task-card stream immediately with a timeline `task_update` and an optional “Original message” URL. Never project thinking or chain-of-thought.
-- Mark the task complete only when no tool approval is pending. A pending tool leaves the task in progress, stops the stream with `suspended`, and renders separate Allow/Deny controls.
-- `SLACK_TASK_CARDS_ENABLED=true` requires `SLACK_STREAMING_ENABLED=true`. When streaming is disabled, log the invalid combination and fall back with task cards disabled.
-- Current sandbox gates are receipt reaction, source links, task cards, streaming, Agent View, tool approvals, feedback, shortcuts, active context, bound-thread replies, and unfurls. Defaults remain disabled in configuration examples so deployments opt in deliberately.
-
-## A2A Task reconciliation
-
-- Web uses assistant-ui AG-UI through the public bridge; Slack uses `ThreadAgentService`. Both reach the private A2A controller. Browser code never receives CMA session IDs or provider events.
-- The active Task is the earliest nonterminal Task in controller FIFO order. History, resume, pending human input, and explicit Stop must select that same Task.
-- A Task subscription is not replay. Reconcile with canonical `GetTask` history before subscribing and after stream closure or failure; deduplicate by stable A2A message ID.
-- A browser reconnect loads A2A history, then compares the resume snapshot with that load. A newer snapshot must refresh the thread so an intervening message appears once. Reload or disconnect never cancels a Task.
-- Explicit Web Stop calls the bridge cancellation endpoint, which cancels the selected A2A Task and triggers controller-private provider cleanup, including while input is pending.
-- Keep Task bindings, push receipts, projection state, attempts, and opaque temporary-object keys in DSQL, never message bodies or tool output.
-
-## Anthropic Managed Agent behavior
-
-- Only controller components receive lock-derived `CLAUDE_AGENT_ID`, `CLAUDE_AGENT_VERSION`, and `CLAUDE_ENVIRONMENT_ID`. Every new session pins `{type: agent, id, version}`; secrets remain outside Git. Environment selection is ID-based rather than version-pinned.
-- The deployed webhook subscribes to `session.status_idled`, `session.status_terminated`, and `session.budget_reached`.
-- Web and Slack surfaces are authorized against the same DSQL principal, allowing an explicitly linked Slack thread to continue an application conversation.
-- Only the CMA controller uses Anthropic session/event APIs for transcript reads, execution, and streams.
-
-## Validation
-
-Use the fast verifier repeatedly while implementing:
-
-```bash
-./scripts/verify --fast
-```
-
-Before declaring a change complete, run the authoritative local verifier:
-
-```bash
-./scripts/verify --full
-```
-
-Individual npm, pytest, E2E, artifact, and Terraform commands remain available for
-focused debugging. `npm run e2e:live` is separate, credentialed, and never part of
-normal verification.
-
-## Local real-Slack smoke
-
-For changes affecting Slack ingress, routing, A2A Task creation, thread/context
-binding, Managed Agent execution, Slack projection, or related deployment
-infrastructure, run deterministic verification first. After deploying the
-current branch to the developer sandbox, run `npm run e2e:slack-user` when
-`SLACK_USER_TOKEN`, `E2E_LIVE_SLACK_CHANNEL_ID`, DSQL access, and concrete AWS
-credentials are configured. Correlate failures by run ID, Slack thread, DSQL
-metadata, and AWS logs, and identify the first observable broken boundary.
-User-token posts carrying Slack bot metadata require the deployed exact
-`SLACK_USER_BOT_ID` and `SLACK_USER_APP_ID` pair; the token itself stays local.
-Do not run it automatically for unrelated changes or substitute synthetic
-Slack ingress for this smoke.
-
-The fast verifier enforces closed-by-default rails before linting:
-
-- Provider SDK imports require an exact path exception. AWS SDK imports belong
-  only in configuration, EventBridge, and administrative operations; Slack SDK
-  imports belong only in Slack adapters and their direct retry test; Anthropic SDK
-  imports belong only in the Managed Agent adapter and the narrow webhook
-  signature verifier. Ports and neutral model/domain/wire modules must not import
-  provider implementations.
-- Every migration-owned table and column must appear in
-  `knowledge/persistence-schema-contract.json`. Update migrations and the contract
-  together, while preserving the independent prohibition on transcript, message,
-  tool-output, and reasoning storage.
-- New test skips, fixmes, and expected failures fail verification unless the same
-  file is the executable test for an active `open` or `accepted` known limitation.
-  Resolved limitations cannot authorize disabled tests. Only the exact PostgreSQL
-  and live-service environment gates are permanent harness exceptions.
-
-## Autonomous change protocol
-
-Before changing code, read the relevant invariants and tests. For a substantial
-change to distributed behavior, protocols, persistence, authorization, or an
-external integration, create or update a feature contract from
-`docs/feature-contract-template.md`. Preserve Runtime and port boundaries;
-handlers must not construct infrastructure or provider clients.
-
-During implementation, run `./scripts/verify --fast`, add tests at the innermost
-layer capable of proving the behavior, and include deterministic duplicate,
-failure, race, or concurrency coverage when those semantics change. Record any
-material unresolved correctness gap in `knowledge/known-limitations.json` and
-reference its stable ID from the executable test that demonstrates it.
-
-Do not add an SDK allowlist path, persistence-contract entry, or permanent test
-exception as a convenience. Each is an architectural decision and must include a
-checker self-test. When a limitation is resolved, enable its test and resolve or
-remove the registry entry in the same change.
-
-Before completion, run `./scripts/verify --full`, review the result against the
-feature contract, and ensure no known limitation was silently removed. Do not claim
-real-provider compatibility unless an existing live contract test proves it;
-otherwise state the remaining live verification requirement explicitly.
-
-The 2026-09-05 verification completed the following paths successfully:
-
-1. Signed channel `app_mention` with exact-message `:eyes:`, source link, and one completed task card.
-2. Unmentioned reply in the already-bound thread with its own exact-message receipt and source link.
-3. Top-level DM/Agent View session creation and completed native task response.
-4. Approval-gated `web_fetch`: suspended task, Allow interaction, control replacement, resumed execution, and final completion.
-5. Native `agent_session_stopped`: authorized Managed Agent `user.interrupt` and an interrupted tool result rather than successful execution.
-6. Invalid `chat.getPermalink` timestamp handled as a non-fatal missing source link.
-7. Chunk-mode recovery payload completed an existing task stream without posting a duplicate response.
-8. Full local validation passed with 51 Python tests and 4 frontend tests; both opt-in live DSQL/Anthropic integration tests passed; the EventBridge DLQ was empty after acceptance.
-
-When debugging, inspect the `slack-ingress`, `agent-input`, `anthropic-webhook`, and `slack-projector` Lambda log groups in that order. Ingress diagnostics intentionally log event metadata and field presence, never Slack message text.
-
-See `knowledge/areas/slack-native-agent-projection.md` and `knowledge/projects/slack-native-working-state-acceptance.md` for the reusable projection rules and acceptance procedure.
+Inspect Slack boundaries in ingress → agent-input → webhook → projector order, including controller/scheduler/push when needed. Preserve run/Task metadata, never payload bodies. See `docs/architecture.md`, `docs/testing.md`, `docs/operations.md`, and `docs/slack-setup.md`.
