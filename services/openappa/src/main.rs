@@ -374,6 +374,95 @@ mod tests {
             },
         }
     }
+    fn email_input(arguments: Value) -> Request {
+        let mut request = input(
+            include_str!("../tests/email-recipient-review.toml"),
+            "mcp/mail/send_email",
+        );
+        request.request.tool_kind = "mcp".into();
+        request.request.arguments = arguments;
+        request
+    }
+    #[tokio::test]
+    async fn email_internal_recipients_are_allowed() {
+        let request = email_input(json!({
+            "to": ["dana@acme.com", "lee@acme.com"], "subject": "Update", "body": "Hello"
+        }));
+        assert_eq!(evaluate(request).await.unwrap()["decision"], "allow");
+    }
+    #[tokio::test]
+    async fn email_mixed_recipients_require_human_review() {
+        let request = email_input(json!({
+            "to": ["dana@acme.com", "pat@partner.io"], "subject": "Update", "body": "Hello"
+        }));
+        assert_eq!(evaluate(request).await.unwrap()["decision"], "human_review");
+    }
+    #[tokio::test]
+    async fn email_external_recipient_requires_human_review() {
+        let request = email_input(json!({
+            "to": ["pat@partner.io"], "subject": "Update", "body": "Hello"
+        }));
+        assert_eq!(evaluate(request).await.unwrap()["decision"], "human_review");
+    }
+    #[tokio::test]
+    async fn email_lookalike_domain_requires_human_review() {
+        let request = email_input(json!({
+            "to": ["x@acme.com.evil.io"], "subject": "Update", "body": "Hello"
+        }));
+        assert_eq!(evaluate(request).await.unwrap()["decision"], "human_review");
+    }
+    #[tokio::test]
+    async fn email_string_recipients_are_denied_by_schema() {
+        let request = email_input(json!({
+            "to": "pat@partner.io, dana@acme.com", "subject": "Update", "body": "Hello"
+        }));
+        assert_eq!(evaluate(request).await.unwrap()["decision"], "deny");
+    }
+    #[tokio::test]
+    async fn email_undeclared_cc_is_denied_by_schema() {
+        let request = email_input(json!({
+            "to": ["dana@acme.com"], "cc": ["pat@partner.io"],
+            "subject": "Update", "body": "Hello"
+        }));
+        assert_eq!(evaluate(request).await.unwrap()["decision"], "deny");
+    }
+    #[tokio::test]
+    async fn recipient_selector_does_not_parse_addresses() {
+        // Known hole: selectors match strings; the mail tool must enforce one address per element.
+        let request = email_input(json!({
+            "to": ["pat@partner.io, dana@acme.com"], "subject": "Update", "body": "Hello"
+        }));
+        assert_eq!(evaluate(request).await.unwrap()["decision"], "allow");
+    }
+    #[tokio::test]
+    async fn email_human_review_authorizes_exact_recipients_and_rejects_changes() {
+        let arguments = json!({
+            "to": ["pat@partner.io"], "subject": "Update", "body": "Hello"
+        });
+        let review = evaluate(email_input(arguments.clone())).await.unwrap();
+        assert_eq!(review["decision"], "human_review");
+        assert_eq!(review["review"]["authority"], "user");
+        for (ruling, decision) in [(Ruling::Approve, "allow"), (Ruling::Deny, "deny")] {
+            let mut request = email_input(arguments.clone());
+            request.resolve = Some(Resolution {
+                fingerprint: review["review"]["fingerprint"].as_str().unwrap().into(),
+                authority: "user".into(),
+                ruling,
+            });
+            assert_eq!(evaluate(request).await.unwrap()["decision"], decision);
+        }
+        let mut changed = email_input(arguments);
+        changed.request.arguments["to"] = json!(["pat@partner.io", "leak@rival.com"]);
+        changed.resolve = Some(Resolution {
+            fingerprint: review["review"]["fingerprint"].as_str().unwrap().into(),
+            authority: "user".into(),
+            ruling: Ruling::Approve,
+        });
+        assert_eq!(
+            evaluate(changed).await.unwrap_err(),
+            RuntimeError::StaleReview
+        );
+    }
     #[tokio::test]
     async fn native_human_review_reconstructs_and_authorizes_exact_call() {
         let policy = include_str!("../tests/human-review.toml");

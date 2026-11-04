@@ -1,0 +1,52 @@
+[policy]
+version = 2
+
+[policy.deployment]
+dispatch = "enforced"
+# CMA pauses these calls before dispatch; this hook runtime never admits inference responses.
+provider_run_tools = []
+context_control = false
+confined_results = []
+
+# Contracts are checked in declaration order; the first match wins.
+# An array selector matches only when EVERY element matches, so one external
+# recipient falls through to the review contract below.
+[[policy.tool]]
+name = "mcp/mail/send_email(to:*@acme.com)"
+parameters = { type = "object", properties = { to = { type = "array", minItems = 1, items = { type = "string" } }, subject = { type = "string" }, body = { type = "string" } }, required = ["to", "subject", "body"] }
+delta = {}
+
+[[policy.tool]]
+name = "mcp/mail/send_email"
+parameters = { type = "object", properties = { to = { type = "array", minItems = 1, items = { type = "string" } }, subject = { type = "string" }, body = { type = "string" } }, required = ["to", "subject", "body"] }
+requires = { attention = ["user-approval"] }
+delta = {}
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+# OpenAPPA requires an annotator for wildcard contracts. This annotator emits
+# only the reserved, ungrantable blocked requirement; OpenAPPA enforces it.
+[[policy.annotator]]
+name = "deny-undeclared"
+ranks = []
+audiences = []
+marks = ["blocked"]
+effects = []
+
+[[policy.tool]]
+name = "*"
+annotator = "deny-undeclared"
+
+[externals.annotators.deny-undeclared]
+command = ["@openappa-cma", "--annotate-blocked"]
+
+[[policy.authority]]
+name = "user"
+hint = "Ask the user to approve this exact email."
+[policy.authority.permits]
+attention = ["user-approval"]
+
+[externals.authorities.user]
+builtin = "hitl"

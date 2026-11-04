@@ -31,4 +31,6 @@ sanitizers are unsupported. Annotators must explicitly declare empty `ranks`,
 New calls use the current policy; previously committed DSQL decisions are not reevaluated.
 One native HITL authority/offer can return structured review text and a SHA-256 fingerprint binding call identity/arguments, trusted policy and authority. Resolve in a new process by reconstructing that offer, submitting the human ruling through the native host control hook, and executing the embedded remedy. Allow requires native `Authorized` for the exact call; deny requires native `Declined`. Non-HITL/multiple remedies fail closed. The review fixture is `tests/human-review.toml`; baseline remains automatic.
 
+`tests/email-recipient-review.toml` is an illustrative MCP email fixture: internal recipients are allowed automatically and external recipients require human review. It is not deployed or wired to an agent or MCP server.
+
 See [architecture](../../docs/architecture.md) and [limitations](../../docs/known-limitations.md).
