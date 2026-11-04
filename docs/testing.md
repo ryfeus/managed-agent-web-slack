@@ -22,6 +22,8 @@ The existing local preview fixture also dispatches Slack hints; there is no extr
 
 ## Human-input evidence
 
+The illustrative native fixture [`email-recipient-review.toml`](../services/openappa/tests/email-recipient-review.toml) tests internal allow, external review, schema rejection, exact-recipient consent and the comma-joined-address limitation; it is not deployed.
+
 Rust tests and `test_openappa_policy.py` use the pinned native engine and a real `requires.attention` + HITL policy. They prove actual review, reconstructed native allow/deny, stale consent rejection and unsupported remedies. PostgreSQL controller tests prove first-writer wins, active Task/lease/cancellation fences, commit-before-confirm and lost-confirmation recovery. Signed Slack integration and `human-review.spec.ts` prove ownership, exact call/explanation, Web reload, either surface resolving the review, duplicate/late rejection and cross-surface control retirement.
 
 Local execution uses fake CMA and a Slack API recorder. It proves application semantics and native policy, not Anthropic's deployed approval contract, installed Slack scopes, native Slack button clicks or client rendering. Tests never replace native review with an application `ask => allow` shortcut. Provider SSE is forbidden on the local P0 path.
