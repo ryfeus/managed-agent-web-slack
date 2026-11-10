@@ -222,3 +222,26 @@ resource "aws_cloudwatch_metric_alarm" "cma_ambiguous_side_effect" {
   comparison_operator = "GreaterThanThreshold"
   treat_missing_data  = "notBreaching"
 }
+
+resource "aws_cloudwatch_log_metric_filter" "cma_custom_tool_held" {
+  name           = "${local.name}-cma-custom-tool-held"
+  log_group_name = aws_cloudwatch_log_group.lambda["cma-scheduler"].name
+  pattern        = "cma_custom_tool_held"
+  metric_transformation {
+    name      = "CustomToolHeld"
+    namespace = "${local.name}/CmaController"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "cma_custom_tool_held" {
+  alarm_name          = "${local.name}-cma-custom-tool-held"
+  namespace           = "${local.name}/CmaController"
+  metric_name         = "CustomToolHeld"
+  statistic           = "Sum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+}

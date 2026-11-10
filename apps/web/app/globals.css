@@ -71,3 +71,7 @@ button { cursor: pointer; }
   .link-button { display: none; }
   .user-message { max-width: 88%; }
 }
+
+.demo-prompts { display: flex; flex-wrap: wrap; justify-content: center; gap: .5rem; margin-top: 1rem; }
+.demo-prompts button { border: 1px solid currentColor; border-radius: .6rem; background: transparent; color: inherit; padding: .65rem .85rem; cursor: pointer; }
+.demo-prompts button:hover { background: #8882; }

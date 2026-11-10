@@ -1,0 +1,10 @@
+--- a/appa-runtime/src/api/mod.rs
++++ b/appa-runtime/src/api/mod.rs
+@@ -2691,6 +2691,6 @@
+     /// What taking a quoted offer in this root's family would consult, or `None` for an
+     /// offer that no longer stands.
+-    pub(crate) fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
++    pub fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
+         self.read_offer(root, quoted, |standing| {
+             standing
+                 .engine

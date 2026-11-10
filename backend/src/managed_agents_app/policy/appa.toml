@@ -3,10 +3,15 @@ version = 2
 
 [policy.deployment]
 dispatch = "enforced"
+starting_label = { audience = ["public"] }
 # CMA pauses these calls before dispatch; this hook runtime never admits inference responses.
 provider_run_tools = []
 context_control = false
-confined_results = []
+confined_results = ["host/cma-custom/demo_read_private_report", "host/cma-custom/demo_read_contact_report"]
+
+[[policy.tool]]
+name = "host/cma-custom/text_metrics"
+delta = {}
 
 [[policy.tool]]
 name = "host/cma/web_fetch"
@@ -28,6 +33,53 @@ ranks = []
 audiences = []
 marks = ["blocked"]
 effects = []
+
+# Synthetic reference examples: native state, approval, redaction and effect history.
+[[policy.tool]]
+name = "host/cma-custom/demo_read_private_report"
+tags = ["demo-private"]
+requires = { attention = ["demo-review"] }
+delta = { audience = ["internal"], trust = "suspicious" }
+
+[[policy.tool]]
+name = "host/cma-custom/demo_read_contact_report"
+tags = ["demo-contact"]
+# Private reads also lower the native trust label. This guard prevents an already
+# restricted demo from taking an unsanitized AllowCall when no narrowing remains.
+requires = { trust = "trusted" }
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "host/cma-custom/demo_prepare_release"
+delta = {}
+effects = ["demo.release_prepared"]
+
+[[policy.tool]]
+name = "host/cma-custom/demo_publish_report"
+parameters = { type = "object", properties = { audience = { type = "string", enum = ["internal", "public"] }, text = { type = "string" } }, required = ["audience", "text"], additionalProperties = false }
+requires = { attention = ["demo-review"], audience = { contains = ["$audience"] }, effects = { contains = ["demo.release_prepared"], excludes = ["demo.report_published"] } }
+delta = {}
+effects = ["demo.report_published"]
+
+[[policy.authority]]
+name = "user"
+hint = "Review this synthetic operation. Repeating publication explicitly waives the recorded publication effect; preparation and audience restrictions still apply."
+[policy.authority.permits]
+attention = ["demo-review"]
+effects_containing = ["demo.report_published"]
+
+[externals.authorities.user]
+builtin = "hitl"
+
+[[policy.sanitizer]]
+name = "demo-redact-email"
+tags = ["demo-contact"]
+on = ["tool_output"]
+[policy.sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
+
+[externals.sanitizers.demo-redact-email]
+builtin = "redact-email"
 
 [[policy.tool]]
 name = "*"

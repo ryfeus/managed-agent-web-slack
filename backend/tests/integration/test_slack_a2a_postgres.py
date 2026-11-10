@@ -474,7 +474,9 @@ def test_signed_native_human_review_is_authorized_and_first_writer_wins(local, r
     current_policy = tmp_path / "review.toml"
     current_policy.write_text(policy.read_text())
     local.local_a2a.composition.scheduler.policy_engine = OpenAppaPolicyEngine(
-        local.config.openappa_binary_path, str(current_policy)
+        local.config.openappa_binary_path,
+        str(current_policy),
+        snapshots=local.local_a2a.composition.scheduler.snapshots,
     )
     local.local_a2a.provider.script(
         "review",
@@ -519,17 +521,31 @@ def test_signed_native_human_review_is_authorized_and_first_writer_wins(local, r
             ],
         }
 
-    # Same INPUT_REQUIRED state, new policy: push must retire the old controls
-    # and expose the freshly offered request, without waiting for a user click.
+    # A changed policy retires consent and holds the pinned trajectory. Restoring
+    # its policy permits recovery; changed canonical input still needs fresh consent.
     stale_action = action("U001", ruling)
     previous = row
-    current_policy.write_text(current_policy.read_text() + "\n# revised policy")
+    original_policy = current_policy.read_text()
+    current_policy.write_text(original_policy + "\n# revised policy")
     context = rows(local, "cma_contexts")[0]
     local.local_a2a.scheduler_trigger.schedule(str(context["context_id"]), "policy-updated")
     drain(local)
     row = rows(local, "cma_input_requests")[0]
     assert row["request_id"] != previous["request_id"]
     assert message["blocks"] == []
+    assert row["review_digest"] is None and row["decision"] is None
+    assert rows(local, "cma_tasks")[0]["held_reason"] == "policy-version-changed"
+    signed(local, stale_action, interaction=True)
+    drain(local)
+    assert local.local_a2a.provider.confirm_calls == 0
+    current_policy.write_text(original_policy)
+    for event in local.local_a2a.provider.events[str(context["cma_session_id"])]:
+        if event.get("id") == "native-review":
+            event["input"] = {"query": "changed private query"}
+    local.local_a2a.scheduler_trigger.schedule(str(context["context_id"]), "canonical-input-updated")
+    drain(local)
+    row = rows(local, "cma_input_requests")[0]
+    assert row["review_digest"] != previous["review_digest"]
     message = next(
         m for m in local.slack.messages.values() if "agent_tool_allow" in json.dumps(m.get("blocks"))
     )

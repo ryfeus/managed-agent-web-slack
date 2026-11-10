@@ -42,8 +42,11 @@ def test_busy_scheduler_wakeup_uses_queue_failure_recovery(config, monkeypatch):
         scheduler_handler, "build_controller", lambda *_args, **_kwargs: SimpleNamespace(scheduler=scheduler)
     )
     event = {"Records": [{"messageId": "wakeup-1", "body": '{"version":1,"contextId":"context-1"}'}]}
-    assert scheduler_handler.handler(event, None) == {"batchItemFailures": [{"itemIdentifier": "wakeup-1"}]}
-    scheduler.run_once.assert_awaited_once_with("context-1")
+    context = SimpleNamespace(get_remaining_time_in_millis=lambda: 54000)
+    assert scheduler_handler.handler(event, context) == {
+        "batchItemFailures": [{"itemIdentifier": "wakeup-1"}]
+    }
+    scheduler.run_once.assert_awaited_once_with("context-1", remaining_seconds=54)
 
 
 def _task(**changes: object) -> dict[str, object]:

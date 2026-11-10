@@ -6,6 +6,11 @@ Web installations must use the staged public commits described below. Keep the
 existing `APP_NAME`, deployment environment, state bucket, CMA identities and
 cookie secret; changing those is not part of this upgrade.
 
+Installations already using the TypeScript Web gateway and migration 012 can go
+directly to [custom tools and persistent policy](#custom-tools-and-persistent-policy).
+Older Python Web installations must still complete the preparation and Web
+checkpoints below before this application update.
+
 ## Preparation and policy migration
 
 1. Review [limitations](known-limitations.md), [DSQL operations](dsql.md), and
@@ -78,6 +83,55 @@ role ARNs from Terraform outputs. Verify IAM denial on the unsigned standalone
 endpoint, authorized access through CloudFront, private controller access and DSQL
 connectivity. Existing authentication secrets remain in Secrets Manager.
 
+## Custom tools and persistent policy
+
+This update adds application-owned custom tools, native SQLite/S3 policy state,
+and exact admitted-output delivery. Upgrade the application and native helper
+together to protocol **6**; intermediate protocol 5 artifacts are not a required
+public upgrade checkpoint.
+
+1. Stop new admission, drain or explicitly cancel active Tasks, and pause input,
+   scheduler and reconciliation consumers/triggers. Settle pending reviews and
+   uncertain execution/delivery under the current code before replacing workers.
+   Preserve attempt markers and retain private recovery artifacts.
+2. Preserve the installation's genuine CMA lock, resource identities, Terraform
+   backend and secrets. The repository lock records the originating workspace's
+   agent version 4; it is not a replacement for another installation's lock.
+   Review `npm run cma:plan` for `text_metrics` and the four synthetic `demo_*`
+   tools. Reconcile through the CLI; never fabricate IDs or edit lock fields.
+3. After verifying account identity and exporting concrete credentials, apply
+   migrations **013, 014 and 015** in order with `npm run db:migrate`. They add
+   custom execution metadata, context checkpoint metadata and admitted-result
+   references. DSQL retains metadata only; raw/admitted bodies and native SQLite
+   snapshots stay in private object storage. No transcript migration occurs.
+4. Build matching Python/native protocol 6 artifacts and review
+   `npm run deploy:plan`. The scheduler gains access to `policy/*` in the existing
+   private bucket and a custom-tool hold alarm; no new storage service is needed.
+   The normal explicit deployment updates CMA before AWS, so keep admission and
+   consumers paused throughout. `--application-only` skips CMA reconciliation,
+   secrets and migrations; operators using it must complete those prerequisites
+   separately. Preserve the normal saved-plan and destructive-change review.
+5. Verify schema, registry, packaged policy/helper, scheduler IAM permissions and
+   the installation's lock-selected CMA version agree before resuming consumers
+   and admission. Use **new conversations** for acceptance and the demos. Existing
+   CMA history is not imported into native policy state; no retroactive coverage
+   is provided. Existing sessions retain their agent definition, and persisted
+   contexts pin exact policy bytes.
+
+For separately authorized acceptance, check custom-tool completion through Web
+and Slack, exact redacted output, persisted restrictions, review Allow/Deny,
+reload and Stop. Use the API-only suites in [testing](testing.md); signed Slack
+fixtures do not establish native-client rendering. Local verification never
+deploys or runs live acceptance.
+
+Rollback requires drained work and new conversations with matching agent,
+backend and native artifacts. Never resume stateful conversations with stateless
+workers or clear checkpoints to bypass a policy-version hold. Retain the additive
+tables/columns, current checkpoints and recovery objects; no down migration is
+provided. The optional orphan sweep preserves current checkpoints and removes
+only unreferenced objects older than 24 hours. See [operations](operations.md)
+for missing-state, withheld-output and uncertain-delivery recovery.
+
 ## User-visible changes
 
 - The supported Slack baseline includes mentions/DMs, owned bound replies,
@@ -88,10 +142,13 @@ connectivity. Existing authentication secrets remain in Secrets Manager.
   user OAuth settings when updating an app. Keep Socket Mode disabled and reinstall
   after scope changes. A manifest update alone does not prove installed scopes or
   revoke previously granted scopes.
-- OpenAPPA evaluates each approval in fresh memory. Automatic policy may decide
-  without a human; a supported native HITL offer exposes exact-call review. First
-  authorized ruling wins, and only native resolution can authorize confirmation.
-  Explicit Stop remains independent. Clarification is answered through Web.
+- OpenAPPA uses fresh helpers reopening persistent native SQLite state. Automatic
+  policy may decide without a human; a supported native HITL offer exposes
+  exact-call review. First authorized ruling wins, and only native resolution
+  can authorize confirmation. Registered custom tools also undergo native result
+  admission. The synthetic demos add persisted restrictions, effect-history
+  review and output redaction. Explicit Stop remains independent. Clarification
+  is answered through Web.
 - Local development is `npm run dev`; setup is explicit. Replace old verification
   wrappers with `npm run check`, `npm run verify:full` and
   `npm run secrets:check`. Local runs never read `.env` or contact live providers.

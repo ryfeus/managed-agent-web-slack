@@ -49,6 +49,14 @@ roll it back. Revert environment source, review/apply, and validate new sessions
 Webhook registration and signing secrets remain separate operational work.
 
 The application agent declares custom `ask_user` with one required string `prompt`.
+It also declares `text_metrics(text)`, executed by the private Python scheduler after
+native OpenAPPA call authorization. Its JSON result contains Unicode code-point and
+UTF-8 byte counts and passes native result admission before returning to CMA.
+Add future trusted handlers through the composition-injected Python registry, declare
+the same input contract here, and add the corresponding `host/cma-custom/<name>` policy
+contract. Async handlers must honor their deadline/cancellation and use the supplied
+stable invocation key for external idempotency. See [architecture](../docs/architecture.md#application-owned-custom-tools)
+and [rollout/recovery](../docs/operations.md#recovery).
 The controller returns clarification answers as custom tool results; permission
 requests use native OpenAPPA automatic decisions or policy-required human review. Genuine Slack clarification acceptance
 uses the linked authenticated web continuation API, because native Slack clarification

@@ -6,7 +6,7 @@ Web and Slack use authorized application threads and A2A Tasks. Only the private
 
 Read relevant implementation/tests before edits. Preserve Runtime/port composition; handlers do not construct provider clients. The active Task is the earliest nonterminal FIFO Task. Load canonical history before subscriptions and reconcile after closure; disconnect never cancels. Explicit Stop remains independent of policy.
 
-Native OpenAPPA evaluates each approval in fresh memory. A single supported HITL offer may expose exact call/policy review to authorized Web/Slack surfaces. First authorized ruling wins; the scheduler reconstructs the native remedy, checks call/policy/authority fingerprint, and commits a fenced final decision before CMA confirmation. Changed consent rotates the request ID. Preserve uncertain-confirmation markers and fail closed for unsupported remedies/outages. No direct surface approval bypass.
+Native OpenAPPA uses fresh helper processes reopening a per-context SQLite/S3 trajectory. Publish its immutable checkpoint pointer and application decision in one fenced DSQL transaction; never reset missing state. A single supported HITL offer may expose exact call/policy review to authorized Web/Slack surfaces. First authorized ruling wins; the scheduler resumes the stored native remedy, checks call/policy/authority fingerprint, and commits a fenced final decision before CMA confirmation. Changed consent rotates the request ID. Preserve uncertain-confirmation markers and fail closed for unsupported remedies/outages. No direct surface approval bypass.
 
 ## Workflow
 

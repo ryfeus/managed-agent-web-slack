@@ -3,7 +3,7 @@
 This is a reference implementation and is not an official Anthropic, Slack, AWS,
 or assistant-ui project.
 
-A serverless reference application for continuing the same Anthropic Managed Agent conversation from Web and Slack. The application owns authorized threads and A2A Tasks; the private controller owns provider sessions, execution and native OpenAPPA tool policy. Anthropic retains the canonical transcript. Aurora DSQL holds identity, routing, idempotency and projection metadata only.
+A serverless reference application for continuing the same Anthropic Managed Agent conversation from Web and Slack. The application owns authorized threads and A2A Tasks; the private controller owns provider sessions, execution and native OpenAPPA tool policy. Anthropic retains the canonical transcript. OpenAPPA policy state persists as private SQLite snapshots in S3, with fenced checkpoint metadata in DSQL. Aurora DSQL holds identity, routing, idempotency and projection metadata only.
 
 ```mermaid
 flowchart LR
@@ -31,7 +31,9 @@ flowchart LR
   Projector -->|canonical Markdown and final title| Card
 ```
 
-The durable P0 path completes without provider SSE or preview transport. OpenAPPA can automatically allow/deny or require review of an exact tool call. Web and Slack submit the first authorized human ruling; a fresh native OpenAPPA remedy must authorize it before CMA confirmation.
+The durable P0 path completes without provider SSE or preview transport. OpenAPPA can automatically allow/deny or require review of an exact tool call. Web and Slack submit the first authorized human ruling; a fresh helper must resume the stored native OpenAPPA remedy and authorize it before CMA confirmation.
+
+Application-owned custom tools also pass native result admission. The [synthetic policy demos](docs/policy-demos.md) show persisted restrictions, exact-call human review and email redaction before simulated publication. Web starter buttons prefill prompts without sending them.
 
 Optional Slack previews show a rolling `Draft: …` title on an existing task card. Canonical Markdown remains authoritative. The same CMA reader feeds independent Web and Slack AppSync subscribers; drafts stay in memory. `SLACK_PREVIEW_ENABLED=false` is the default and enabling it also requires `PREVIEW_ENABLED=true`. See the [Phase 6 rollout note](docs/phase-6-rollout.md) for limits and remaining live acceptance.
 

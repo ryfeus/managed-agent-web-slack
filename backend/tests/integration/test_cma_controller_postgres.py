@@ -58,7 +58,7 @@ def controller(tmp_path: Path):
         trigger,
         policy_engine=OpenAppaPolicyEngine(
             str(Path(__file__).resolve().parents[3] / ".generated/openappa-bin/openappa-cma"),
-            str(Path(__file__).resolve().parents[2] / "src/managed_agents_app/policy/appa.toml"),
+            str(Path(__file__).resolve().parents[3] / "services/openappa/tests/baseline.toml"),
         ),
     )
     yield repository, provider, pending, trigger, service, scheduler
@@ -1190,7 +1190,7 @@ async def test_policy_operational_failures_do_not_confirm(controller, monkeypatc
     assert provider.confirm_calls == 1
     emit_calls(provider, session_id, [("second", "web_search")])
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise OSError("private diagnostic")
 
     class TimeoutPolicy:
@@ -1232,8 +1232,8 @@ async def test_policy_changes_only_affect_new_approval_events(controller, tmp_pa
     emit_calls(provider, session_id, [("old-policy", "web_search")])
     publish = repository.record_policy_decision
 
-    def lost_ack(*args):
-        publish(*args)
+    def lost_ack(*args, **kwargs):
+        publish(*args, **kwargs)
         policy.write_text(baseline.replace("host/cma/web_search", "host/cma/other"))
         raise ConnectionError("publication ack lost")
 
@@ -1271,9 +1271,9 @@ async def test_policy_publication_crash_recovery(controller, monkeypatch, crash)
     class WorkerCrash(BaseException):
         pass
 
-    def crash_publish(*args):
+    def crash_publish(*args, **kwargs):
         if crash == "after":
-            publish(*args)
+            publish(*args, **kwargs)
         raise WorkerCrash()
 
     monkeypatch.setattr(repository, "record_policy_decision", crash_publish)

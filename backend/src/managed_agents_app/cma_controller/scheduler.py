@@ -9,6 +9,7 @@ from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from managed_agents_app.cma_controller.custom_tools import CustomToolRegistry, default_custom_tools
 from managed_agents_app.cma_controller.pending_input import PendingInputStore
 from managed_agents_app.cma_controller.preview import PreviewHint, PreviewTrigger
 from managed_agents_app.cma_controller.provider import CmaProvider, DefinitiveProviderError
@@ -17,12 +18,21 @@ from managed_agents_app.cma_controller.runtime_repository import (
     ControllerRuntimeRepository,
     LostSchedulerClaim,
 )
+from managed_agents_app.cma_controller.tool_execution import ToolExecutionRunner
 from managed_agents_app.cma_controller.trigger import SchedulerTrigger
 from managed_agents_app.observability import emit
-from managed_agents_app.policy.models import HumanReview, PolicyError, ToolPolicyEngine, ToolPolicyRequest
+from managed_agents_app.policy.models import (
+    HumanReview,
+    PolicyError,
+    PolicyState,
+    ToolPolicyEngine,
+    ToolPolicyRequest,
+)
+from managed_agents_app.policy.snapshots import SnapshotStore
 
 logger = logging.getLogger(__name__)
 _preview_hints: ContextVar[dict[str, PreviewHint] | None] = ContextVar("preview_hints", default=None)
+_deadline: ContextVar[float | None] = ContextVar("scheduler_deadline", default=None)
 
 
 def approval_request_id(task_id: str, provider_event_id: str) -> str:
@@ -66,6 +76,8 @@ class CmaScheduler:
         *,
         policy_engine: ToolPolicyEngine | None = None,
         preview_trigger: PreviewTrigger | None = None,
+        custom_tools: CustomToolRegistry | None = None,
+        snapshots: SnapshotStore | None = None,
     ) -> None:
         self.repository = repository
         self.provider = provider
@@ -73,7 +85,11 @@ class CmaScheduler:
         self.trigger = trigger
         self.push_trigger = push_trigger
         self.policy_engine = policy_engine
+        self.snapshots = snapshots
         self.preview_trigger = preview_trigger
+        self.custom_tools = ToolExecutionRunner(
+            repository, provider, pending_input, custom_tools or default_custom_tools()
+        )
 
     def sweep_orphans(self) -> tuple[int, int]:
         referenced = self.repository.pending_input_keys()
@@ -82,12 +98,33 @@ class CmaScheduler:
             if key not in referenced:
                 self.pending_input.delete(key)
                 deleted += 1
+        if self.snapshots is not None:
+            checkpoints = self.repository.policy_checkpoint_keys()
+            for key in self.snapshots.list_old_keys(86400):
+                if key not in checkpoints:
+                    self.snapshots.delete(key)
+                    deleted += 1
         stale = self.repository.stale_pending_input_count()
         if stale:
             logger.warning("cma_stale_pending_input", extra={"count": stale})
         return deleted, stale
 
-    async def run_once(self, context_id: str) -> None:
+    async def run_once(self, context_id: str, *, remaining_seconds: float = 60) -> None:
+        deadline_token = _deadline.set(asyncio.get_running_loop().time() + remaining_seconds - 5)
+        try:
+            await self._run_once(context_id)
+        finally:
+            _deadline.reset(deadline_token)
+
+    def _remaining(self, context_id: str) -> float:
+        context = self.repository.get_context(context_id)
+        if context is None or not context.get("scheduler_lease_expires_at"):
+            return 0
+        lease = float((context["scheduler_lease_expires_at"] - datetime.now(UTC)).total_seconds()) - 5
+        deadline = _deadline.get()
+        return min(lease, deadline - asyncio.get_running_loop().time()) if deadline is not None else lease
+
+    async def _run_once(self, context_id: str) -> None:
         claim = self.repository.claim_scheduler(context_id)
         if claim is None:
             emit("scheduler_claim", context_id=context_id, outcome="busy")
@@ -347,6 +384,11 @@ class CmaScheduler:
                         self.repository.add_clarification_request(
                             approval_request_id(task_id, event_id), task_id, event_id, context_id, claim
                         )
+                    elif source.get("type") == "agent.custom_tool_use" and source.get("name") != "ask_user":
+                        self.repository.add_input_request(
+                            approval_request_id(task_id, event_id), task_id, event_id, context_id, claim
+                        )
+                        self.custom_tools.prepare(context_id, task_id, claim, source)
                 if not await self._evaluate_policy(context_id, task_id, claim, by_id):
                     self._set_waiting_state(context_id, task_id, claim)
                     return
@@ -389,6 +431,16 @@ class CmaScheduler:
         order = {event_id: index for index, event_id in enumerate(by_id)}
         rows.sort(key=lambda row: order.get(str(row["cma_event_id"]), len(order)))
         for row in rows:
+            # A prior custom result must change native state before the next call is authorized.
+            source = by_id.get(str(row["cma_event_id"]))
+            if (
+                self.snapshots is not None
+                and row["status"] == "resolving"
+                and source
+                and source.get("type") == "agent.custom_tool_use"
+                and source.get("name") != "ask_user"
+            ):
+                return True
             if row["kind"] == "clarification" or row["status"] != "pending":
                 continue
             current = self.repository.get_context(context_id)
@@ -397,7 +449,7 @@ class CmaScheduler:
             task = self.repository.get_task(task_id)
             if task is None or task.get("cancel_requested_at"):
                 return False
-            remaining = (current["scheduler_lease_expires_at"] - datetime.now(UTC)).total_seconds() - 5
+            remaining = self._remaining(context_id)
             if remaining <= 1:
                 return True
             source = by_id.get(str(row["cma_event_id"]))
@@ -408,6 +460,14 @@ class CmaScheduler:
                 "openappa_call_id": str(row["cma_event_id"]),
             }
             try:
+                execution = None
+                if source and source.get("type") == "agent.custom_tool_use":
+                    execution = self.custom_tools.prepare(context_id, task_id, claim, source)
+                    if execution.get("control_code"):
+                        self.repository.record_policy_decision(
+                            context_id, task_id, claim, str(row["request_id"]), "deny"
+                        )
+                        continue
                 if self.policy_engine is None:
                     raise PolicyError()
                 if not source or not isinstance(source.get("name"), str):
@@ -417,8 +477,12 @@ class CmaScheduler:
                     arguments = {}
                 if not isinstance(arguments, dict):
                     raise PolicyError("policy-invalid-request")
-                kind: Literal["builtin", "mcp"] = (
-                    "mcp" if source["type"] == "agent.mcp_tool_use" else "builtin"
+                kind: Literal["builtin", "mcp", "custom"] = (
+                    "custom"
+                    if execution is not None
+                    else "mcp"
+                    if source["type"] == "agent.mcp_tool_use"
+                    else "builtin"
                 )
                 name = str(source["name"])
                 if kind == "mcp" and not name.startswith("mcp/"):
@@ -433,6 +497,7 @@ class CmaScheduler:
                     kind,
                     name,
                     arguments,
+                    state=PolicyState.from_context(current),
                 )
                 fields.update(tool_name=name, tool_kind=kind)
                 logger.info("policy_tool_call_started", extra=fields)
@@ -446,6 +511,8 @@ class CmaScheduler:
                         )
                     else:
                         decision = await self.policy_engine.evaluate_tool_call(request, remaining)
+                if self.snapshots is not None and decision.checkpoint is None:
+                    raise PolicyError("policy-checkpoint-missing")
                 if decision.decision == "human_review":
                     if decision.review is None:
                         raise PolicyError("policy-invalid-response")
@@ -462,8 +529,11 @@ class CmaScheduler:
                             decision.review.fingerprint,
                             decision.review.authority,
                             key,
+                            checkpoint=decision.checkpoint,
                         )
                     self.repository.update_task(task_id, context_id, claim, held_reason=None)
+                    if self.snapshots is not None:
+                        return True
                     continue
                 if row.get("review_digest") and not row.get("human_ruling"):
                     # A changed policy must invalidate the offered review first.
@@ -474,8 +544,21 @@ class CmaScheduler:
                 if decision.decision not in {"allow", "deny"}:
                     raise PolicyError("policy-invalid-response")
                 try:
+                    authorization_key = None
+                    if execution is not None and decision.decision == "allow":
+                        if decision.authorization is None:
+                            raise PolicyError("policy-authorization-missing")
+                        authorization_key = self.custom_tools.store_authorization(
+                            execution, decision.authorization
+                        )
                     self.repository.record_policy_decision(
-                        context_id, task_id, claim, str(row["request_id"]), decision.decision
+                        context_id,
+                        task_id,
+                        claim,
+                        str(row["request_id"]),
+                        decision.decision,
+                        checkpoint=decision.checkpoint,
+                        **({"authorization_object_key": authorization_key} if execution is not None else {}),
                     )
                 except LostSchedulerClaim:
                     raise
@@ -486,6 +569,8 @@ class CmaScheduler:
                     "policy_tool_call_allowed" if decision.decision == "allow" else "policy_tool_call_denied",
                     extra={**fields, "policy_decision": decision.decision},
                 )
+                if self.snapshots is not None and execution is not None:
+                    return True
             except LostSchedulerClaim:
                 raise
             except Exception as error:
@@ -522,10 +607,42 @@ class CmaScheduler:
             for e in events
             if e.get("type") == "user.tool_confirmation"
         }
-        for request in self.repository.list_input_requests(str(task["task_id"])):
+        by_id = {str(event.get("id")): event for event in events}
+        order = {event_id: index for index, event_id in enumerate(by_id)}
+        requests = self.repository.list_input_requests(str(task["task_id"]))
+        requests.sort(key=lambda row: order.get(str(row["cma_event_id"]), len(order)))
+        for request in requests:
             if request["status"] != "resolving":
                 continue
             event_id = str(request["cma_event_id"])
+            source = by_id.get(event_id)
+            if self.custom_tools.executions.get(str(task["task_id"]), event_id) is not None or (
+                source and source.get("type") == "agent.custom_tool_use" and source.get("name") != "ask_user"
+            ):
+                try:
+                    delivered = await self.custom_tools.reconcile(
+                        context_id,
+                        task,
+                        claim,
+                        session_id,
+                        request,
+                        source,
+                        events,
+                        self.policy_engine,
+                        self._remaining(context_id),
+                    )
+                except DefinitiveProviderError:
+                    self.repository.update_context(context_id, claim, lifecycle_state="failed")
+                    self._finish(context_id, str(task["task_id"]), claim, "FAILED", "")
+                    return True
+                if delivered:
+                    self._resolve_input(request, context_id, claim)
+                    self.custom_tools.cleanup(str(task["task_id"]), event_id)
+                    if self.snapshots is not None:
+                        self.trigger.schedule(context_id, "policy-next-call")
+                elif self.snapshots is not None:
+                    return False
+                continue
             if request["kind"] == "clarification":
                 if any(
                     event.get("type") == "user.custom_tool_result"
@@ -628,10 +745,14 @@ class CmaScheduler:
         reason = str(current_task.get("held_reason") or "")
         requests = self.repository.list_input_requests(str(task["task_id"]))
         if (
-            reason == "ambiguous-confirmation" and not any(row["status"] == "resolving" for row in requests)
-        ) or (
-            reason.startswith("policy-")
-            and not any(row["kind"] == "tool_approval" and row["status"] != "resolved" for row in requests)
+            (reason == "ambiguous-confirmation" and not any(row["status"] == "resolving" for row in requests))
+            or (
+                reason.startswith("policy-")
+                and not any(
+                    row["kind"] == "tool_approval" and row["status"] != "resolved" for row in requests
+                )
+            )
+            or (reason.startswith("tool-") and not any(row["status"] != "resolved" for row in requests))
         ):
             self.repository.update_task(str(task["task_id"]), context_id, claim, held_reason=None)
         return False
@@ -646,6 +767,19 @@ class CmaScheduler:
     ) -> None:
         task_id = str(task["task_id"])
         relevant = _after(events, str(task["cma_input_event_id"]))
+        status = _latest_status(relevant)
+        pending_ids = set(((status or {}).get("stop_reason") or {}).get("event_ids", []))
+        for source in relevant:
+            if (
+                source.get("id") in pending_ids
+                and source.get("type") == "agent.custom_tool_use"
+                and source.get("name") != "ask_user"
+            ):
+                event_id = str(source["id"])
+                self.repository.add_input_request(
+                    approval_request_id(task_id, event_id), task_id, event_id, context_id, claim
+                )
+                self.custom_tools.prepare(context_id, task_id, claim, source)
         interrupt_index = next((i for i, e in enumerate(relevant) if e.get("type") == "user.interrupt"), None)
         if interrupt_index is not None:
             idle = _latest_status(relevant[interrupt_index + 1 :])
