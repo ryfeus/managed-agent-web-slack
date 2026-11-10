@@ -1,4 +1,5 @@
-//! Stateless transport only. All authorization belongs to OpenAPPA.
+//! Embedded transport only. All authorization belongs to OpenAPPA.
+mod persistence;
 use appa_eventlog::{Backend, LogStore};
 use appa_runtime::{
     api::{RemedyOutcome, Runtime},
@@ -6,7 +7,8 @@ use appa_runtime::{
     hooks,
 };
 use appa_runtime_api::{
-    Actor, CONTROL_TOOL, HookDecision, HookEvent, ProposedCall, Ruling, TrajectoryId,
+    Actor, CONTROL_TOOL, HookDecision, HookEvent, OutcomeBody, ProposedCall, Ruling, ToolOutcome,
+    TrajectoryId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -34,6 +36,17 @@ struct Request {
     policy: String,
     request: Call,
     resolve: Option<Resolution>,
+    #[serde(default)]
+    custom_tools: Vec<String>,
+    result: Option<ToolResult>,
+    authorization: Option<String>,
+    database: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolResult {
+    text: String,
+    is_error: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,8 +67,8 @@ struct Call {
     runtime: String,
 }
 async fn evaluate(input: Request) -> Result<Value, RuntimeError> {
-    let call = input.request;
-    if input.version != 3
+    let call = &input.request;
+    if input.version != 6
         || call.root_id.is_empty()
         || call.invocation_id.is_empty()
         || call.agent_id.is_empty()
@@ -67,10 +80,18 @@ async fn evaluate(input: Request) -> Result<Value, RuntimeError> {
     let tool = match call.tool_kind.as_str() {
         "builtin" => format!("host/cma/{}", call.tool_name),
         "mcp" => call.tool_name.clone(),
+        "custom" if input.custom_tools.contains(&call.tool_name) => {
+            format!("host/cma-custom/{}", call.tool_name)
+        }
         _ => return Err(RuntimeError::InvalidRequest),
     };
     appa_runtime_api::CanonicalTool::parse(&tool).map_err(|_| RuntimeError::InvalidRequest)?;
-    // This hook cannot mediate results. Reject policies requiring unsupported controls.
+    if input.result.is_some() != input.authorization.is_some()
+        || (input.result.is_some() && call.tool_kind != "custom")
+    {
+        return Err(RuntimeError::InvalidRequest);
+    }
+    // Stateful labels may originate only at application-owned result boundaries.
     let mut document: toml::Value =
         toml::from_str(&input.policy).map_err(|_| RuntimeError::InvalidPolicy)?;
     let policy = document.get("policy").ok_or(RuntimeError::InvalidPolicy)?;
@@ -82,7 +103,13 @@ async fn evaluate(input: Request) -> Result<Value, RuntimeError> {
             || deployment
                 .get("confined_results")
                 .and_then(toml::Value::as_array)
-                .is_some_and(|v| !v.is_empty())
+                .is_some_and(|v| {
+                    v.iter().any(|name| {
+                        !input.custom_tools.iter().any(|registered| {
+                            name.as_str() == Some(format!("host/cma-custom/{registered}").as_str())
+                        })
+                    })
+                })
             || deployment
                 .get("provider_run_tools")
                 .and_then(toml::Value::as_array)
@@ -93,22 +120,28 @@ async fn evaluate(input: Request) -> Result<Value, RuntimeError> {
     }
     if let Some(tools) = policy.get("tool").and_then(toml::Value::as_array) {
         for tool in tools {
-            if tool
-                .get("delta")
-                .and_then(toml::Value::as_table)
-                .is_some_and(|v| !v.is_empty())
-                || tool
-                    .get("effects")
-                    .and_then(toml::Value::as_array)
-                    .is_some_and(|v| !v.is_empty())
-                || tool
-                    .get("requires")
-                    .and_then(|v| v.get("effects"))
+            let stateful_custom = input.database.is_some()
+                && input.custom_tools.iter().any(|name| {
+                    tool.get("name").and_then(toml::Value::as_str)
+                        == Some(format!("host/cma-custom/{name}").as_str())
+                });
+            if !stateful_custom
+                && (tool
+                    .get("delta")
                     .and_then(toml::Value::as_table)
-                    .is_some_and(|v| {
-                        v.values()
-                            .any(|items| items.as_array().is_some_and(|a| !a.is_empty()))
-                    })
+                    .is_some_and(|v| !v.is_empty())
+                    || tool
+                        .get("effects")
+                        .and_then(toml::Value::as_array)
+                        .is_some_and(|v| !v.is_empty())
+                    || tool
+                        .get("requires")
+                        .and_then(|v| v.get("effects"))
+                        .and_then(toml::Value::as_table)
+                        .is_some_and(|v| {
+                            v.values()
+                                .any(|items| items.as_array().is_some_and(|a| !a.is_empty()))
+                        }))
             {
                 return Err(RuntimeError::UnsupportedPolicy);
             }
@@ -129,20 +162,26 @@ async fn evaluate(input: Request) -> Result<Value, RuntimeError> {
             }
         }
     }
-    if policy
-        .get("sanitizer")
-        .and_then(toml::Value::as_array)
-        .is_some_and(|v| !v.is_empty())
-    {
-        return Err(RuntimeError::UnsupportedPolicy);
-    }
-    if let Some(authorities) = policy.get("authority").and_then(toml::Value::as_array) {
-        for authority in authorities {
-            if authority
-                .get("permits")
-                .and_then(|v| v.get("effects_containing"))
-                .and_then(toml::Value::as_array)
-                .is_some_and(|v| !v.is_empty())
+    if let Some(sanitizers) = policy.get("sanitizer").and_then(toml::Value::as_array) {
+        for sanitizer in sanitizers {
+            let name = sanitizer
+                .get("name")
+                .and_then(toml::Value::as_str)
+                .ok_or(RuntimeError::InvalidPolicy)?;
+            let external = document
+                .get("externals")
+                .and_then(|v| v.get("sanitizers"))
+                .and_then(|v| v.get(name));
+            let builtin = external
+                .and_then(|v| v.get("builtin"))
+                .and_then(toml::Value::as_str);
+            if input.database.is_none()
+                || sanitizer.get("on").and_then(toml::Value::as_array)
+                    != Some(&vec![toml::Value::String("tool_output".into())])
+                || !matches!(builtin, Some("redact-email" | "redact-secrets"))
+                || external
+                    .and_then(toml::Value::as_table)
+                    .is_none_or(|v| v.len() != 1)
             {
                 return Err(RuntimeError::UnsupportedPolicy);
             }
@@ -166,6 +205,24 @@ async fn evaluate(input: Request) -> Result<Value, RuntimeError> {
                 == Some("hitl")
         })
         .map(str::to_owned);
+    if policy
+        .get("authority")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|v| {
+                v.get("permits")
+                    .and_then(|v| v.get("effects_containing"))
+                    .and_then(toml::Value::as_array)
+                    .is_some_and(|v| !v.is_empty())
+            })
+        })
+        && (input.database.is_none() || authority.is_none())
+    {
+        return Err(RuntimeError::UnsupportedPolicy);
+    }
+    if input.result.as_ref().is_some_and(|r| r.text.len() > 65536) {
+        return Err(RuntimeError::InvalidRequest);
+    }
     let fingerprint = format!(
         "{:x}",
         Sha256::digest(
@@ -173,8 +230,17 @@ async fn evaluate(input: Request) -> Result<Value, RuntimeError> {
                 .map_err(|_| RuntimeError::InvalidRequest)?
         )
     );
+    if input
+        .authorization
+        .as_ref()
+        .is_some_and(|proof| proof != &fingerprint)
+    {
+        return Err(RuntimeError::StaleReview);
+    }
     if let Some(resolve) = &input.resolve {
-        if resolve.fingerprint != fingerprint || Some(&resolve.authority) != authority.as_ref() {
+        if (input.database.is_none() && resolve.fingerprint != fingerprint)
+            || Some(&resolve.authority) != authority.as_ref()
+        {
             return Err(RuntimeError::StaleReview);
         }
     }
@@ -210,6 +276,9 @@ async fn evaluate(input: Request) -> Result<Value, RuntimeError> {
     let config =
         Config::load_from(config_file.path(), &[]).map_err(|_| RuntimeError::InvalidPolicy)?;
     drop(config_file);
+    if let Some(database) = &input.database {
+        return persistence::evaluate(&input, config, database, tool, fingerprint, authority).await;
+    }
     let store =
         Arc::new(LogStore::open(Backend::Memory).map_err(|_| RuntimeError::RuntimeUnavailable)?);
     let runtime =
@@ -242,14 +311,15 @@ async fn evaluate(input: Request) -> Result<Value, RuntimeError> {
                 arguments: serde_json::value::to_raw_value(&call.arguments)
                     .map_err(|_| RuntimeError::InvalidRequest)?,
             },
-            call_id: Some(call.invocation_id),
+            call_id: Some(call.invocation_id.clone()),
             spawn: None,
             prompt: None,
             ruling: None,
         },
     )
     .await;
-    let decision = match result.decision {
+    let reconstructed_remedy = input.resolve.is_some();
+    let mut decision = match result.decision {
         HookDecision::AllowCall { spawn: None } if input.resolve.is_none() => {
             json!({"decision":"allow","reason":null})
         }
@@ -316,7 +386,7 @@ async fn evaluate(input: Request) -> Result<Value, RuntimeError> {
                 }
             } else {
                 json!({"decision":"human_review","reason":null,"review":{
-                    "authority":authority,"fingerprint":fingerprint,"description":review[0].text
+                    "authority":authority,"fingerprint":fingerprint.clone(),"description":review[0].text
                 }})
             }
         }
@@ -324,6 +394,74 @@ async fn evaluate(input: Request) -> Result<Value, RuntimeError> {
         // Operational errors are Refuse, not DenyCall (upstream hooks::fold).
         _ => return Err(RuntimeError::RuntimeUnavailable),
     };
+    if let Some(outcome) = input.result {
+        if decision["decision"] != "allow" {
+            return Err(RuntimeError::StaleReview);
+        }
+        let proposed = ProposedCall {
+            tool,
+            cwd: None,
+            arguments: serde_json::value::to_raw_value(&call.arguments)
+                .map_err(|_| RuntimeError::InvalidRequest)?,
+        };
+        // A native remedy releases permission; re-proposal binds the host call ID
+        // to its dispatch. Neither operation executes the application handler.
+        if reconstructed_remedy {
+            let opened = hooks::handle_embedded(
+                &runtime,
+                HookEvent::ToolCall {
+                    actor: actor.clone(),
+                    call: proposed.clone(),
+                    call_id: Some(call.invocation_id.clone()),
+                    spawn: None,
+                    prompt: None,
+                    ruling: None,
+                },
+            )
+            .await;
+            if !matches!(opened.decision, HookDecision::AllowCall { spawn: None }) {
+                return Err(RuntimeError::StaleReview);
+            }
+        }
+        // The upstream failure hook does not mediate arbitrary failure text.
+        // Only this fixed controller-authored error can enter that hook.
+        if outcome.is_error && outcome.text != "The custom tool failed." {
+            return Err(RuntimeError::InvalidRequest);
+        }
+        let native_outcome = if outcome.is_error {
+            ToolOutcome::Failure {
+                message: outcome.text.clone(),
+            }
+        } else {
+            ToolOutcome::Success {
+                body: OutcomeBody::Available(outcome.text.clone()),
+            }
+        };
+        let result = hooks::handle_embedded(
+            &runtime,
+            HookEvent::ToolResult {
+                actor,
+                call: proposed,
+                call_id: Some(call.invocation_id.clone()),
+                outcome: native_outcome,
+            },
+        )
+        .await;
+        // Stateless diagnostic path cannot select sanitizers. Never forward notices.
+        return match result.decision {
+            HookDecision::Ack => Ok(json!({"decision":"deliver","text":outcome.text})),
+            HookDecision::DeliverValue { value } if value == outcome.text => {
+                Ok(json!({"decision":"deliver","text":value}))
+            }
+            HookDecision::ReplaceOutput { .. } | HookDecision::DeliverValue { .. } => {
+                Ok(json!({"decision":"withhold"}))
+            }
+            _ => Err(RuntimeError::RuntimeUnavailable),
+        };
+    }
+    if call.tool_kind == "custom" && decision["decision"] == "allow" {
+        decision["fingerprint"] = json!(fingerprint);
+    }
     Ok(decision)
 }
 #[tokio::main]
@@ -344,12 +482,12 @@ async fn main() {
     let response = match io::stdin().take(2 * 1024 * 1024).read_to_string(&mut body) {
         Ok(_) => match serde_json::from_str::<Request>(&body) {
             Ok(input) => match evaluate(input).await {
-                Ok(decision) => json!({"version":3,"result":decision}),
-                Err(code) => json!({"version":3,"error":code}),
+                Ok(decision) => json!({"version":6,"result":decision}),
+                Err(code) => json!({"version":6,"error":code}),
             },
-            Err(_) => json!({"version":3,"error":RuntimeError::InvalidRequest}),
+            Err(_) => json!({"version":6,"error":RuntimeError::InvalidRequest}),
         },
-        Err(_) => json!({"version":3,"error":RuntimeError::InvalidRequest}),
+        Err(_) => json!({"version":6,"error":RuntimeError::InvalidRequest}),
     };
     println!("{response}");
 }
@@ -360,9 +498,13 @@ mod tests {
     const POLICY: &str = include_str!("../tests/baseline.toml");
     fn input(policy: &str, name: &str) -> Request {
         Request {
-            version: 3,
+            version: 6,
             policy: policy.into(),
             resolve: None,
+            custom_tools: vec![],
+            result: None,
+            authorization: None,
+            database: None,
             request: Call {
                 root_id: "context-1".into(),
                 invocation_id: "event-1".into(),
@@ -382,6 +524,82 @@ mod tests {
         request.request.tool_kind = "mcp".into();
         request.request.arguments = arguments;
         request
+    }
+    fn custom_input(policy: &str) -> Request {
+        let mut request = input(policy, "text_metrics");
+        request.request.tool_kind = "custom".into();
+        request.custom_tools = vec!["text_metrics".into()];
+        request
+    }
+    #[tokio::test]
+    async fn custom_result_reconstructs_only_its_exact_authorized_dispatch() {
+        let call = evaluate(custom_input(POLICY)).await.unwrap();
+        assert_eq!(call["decision"], "allow");
+        let mut result = custom_input(POLICY);
+        result.authorization = Some(call["fingerprint"].as_str().unwrap().into());
+        result.result = Some(ToolResult {
+            text: "metrics".into(),
+            is_error: false,
+        });
+        assert_eq!(
+            evaluate(result).await.unwrap(),
+            json!({"decision":"deliver","text":"metrics"})
+        );
+
+        let mut substituted = custom_input(POLICY);
+        substituted.authorization = Some(call["fingerprint"].as_str().unwrap().into());
+        substituted.request.arguments = json!({"different":true});
+        substituted.result = Some(ToolResult {
+            text: "metrics".into(),
+            is_error: false,
+        });
+        assert_eq!(
+            evaluate(substituted).await.unwrap_err(),
+            RuntimeError::StaleReview
+        );
+    }
+    #[tokio::test]
+    async fn native_result_cap_withholds_without_returning_the_payload() {
+        let policy = POLICY.replace("max_body_bytes = 65536", "max_body_bytes = 256");
+        let call = evaluate(custom_input(&policy)).await.unwrap();
+        let mut result = custom_input(&policy);
+        result.authorization = Some(call["fingerprint"].as_str().unwrap().into());
+        result.result = Some(ToolResult {
+            text: "private".repeat(100),
+            is_error: false,
+        });
+        assert_eq!(
+            evaluate(result).await.unwrap(),
+            json!({"decision":"withhold"})
+        );
+    }
+    #[tokio::test]
+    async fn confinement_inventory_and_failure_text_are_not_guessed() {
+        let policy = POLICY.replace(
+            "confined_results = []",
+            "confined_results = ['host/cma-custom/text_metrics']",
+        );
+        assert_eq!(
+            evaluate(custom_input(&policy)).await.unwrap()["decision"],
+            "allow"
+        );
+        let mut unregistered = custom_input(&policy);
+        unregistered.custom_tools.clear();
+        assert_eq!(
+            evaluate(unregistered).await.unwrap_err(),
+            RuntimeError::InvalidRequest
+        );
+        let call = evaluate(custom_input(POLICY)).await.unwrap();
+        let mut result = custom_input(POLICY);
+        result.authorization = Some(call["fingerprint"].as_str().unwrap().into());
+        result.result = Some(ToolResult {
+            text: "private exception".into(),
+            is_error: true,
+        });
+        assert_eq!(
+            evaluate(result).await.unwrap_err(),
+            RuntimeError::InvalidRequest
+        );
     }
     #[tokio::test]
     async fn email_internal_recipients_are_allowed() {

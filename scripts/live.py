@@ -231,7 +231,7 @@ def preflight(approval=False, metadata_only=False):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", nargs="?", choices=("smoke", "approval", "all"), default="all")
+    parser.add_argument("mode", nargs="?", choices=("smoke", "approval", "all", "demos"), default="all")
     args = parser.parse_args()
     if os.getenv("RUN_LIVE_E2E") != "1":
         print("Live smoke sends real messages. Set RUN_LIVE_E2E=1 to opt in.", file=sys.stderr)
@@ -242,6 +242,18 @@ def main() -> int:
             subprocess.run(
                 [sys.executable, str(ROOT / "scripts/slack_user.py"), "smoke"], cwd=ROOT, check=True
             )
+        if args.mode == "demos":
+            subprocess.run(
+                [
+                    "node",
+                    "node_modules/@playwright/test/cli.js",
+                    "test",
+                    "--config=playwright.live.config.ts",
+                    "policy-demos.spec.ts",
+                ],
+                cwd=ROOT,
+                check=True,
+            )
         if args.mode in ("approval", "all"):
             subprocess.run(
                 [
@@ -250,7 +262,7 @@ def main() -> int:
                     "test",
                     "--config=playwright.live.config.ts",
                     "slack-approval.spec.ts",
-                    *(["slack-clarification.spec.ts"] if args.mode == "all" else []),
+                    *(["slack-clarification.spec.ts", "custom-tools.spec.ts"] if args.mode == "all" else []),
                 ],
                 cwd=ROOT,
                 check=True,

@@ -17,6 +17,7 @@ WORKDIR /build/openappa
 COPY openappa/Cargo.toml openappa/Cargo.lock ./
 COPY openappa/src ./src
 COPY openappa/tests ./tests
+COPY openappa/upstream ./upstream
 RUN --mount=type=cache,id=openappa-target-${TARGETARCH},target=/build/openappa/target \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -31,7 +32,10 @@ COPY launchers /build/launchers
 RUN python - <<'PY'
 import json
 import shutil
+import sqlite3
+from contextlib import closing
 import subprocess
+import tempfile
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 # Verify the static helper on the actual Amazon Linux/Python build base too.
@@ -39,10 +43,10 @@ def native(request):
     result = subprocess.run(['/build/openappa-cma'], input=json.dumps(request),
         capture_output=True, text=True, timeout=15, check=True)
     response = json.loads(result.stdout)
-    assert response['version'] == 3
+    assert response['version'] == 6
     return response['result']
 
-request = {'version': 3,
+request = {'version': 6,
     'policy': Path('/build/policy-fixtures/baseline.toml').read_text(), 'request': {
         'root_id': 'artifact-root', 'invocation_id': 'artifact-event', 'agent_id': 'artifact',
         'tool_kind': 'builtin', 'tool_name': 'web_fetch', 'arguments': {}, 'runtime': 'cma'}}
@@ -56,6 +60,86 @@ for ruling, decision in [('approve', 'allow'), ('deny', 'deny')]:
     request['resolve'] = {key: review['review'][key] for key in ('authority', 'fingerprint')}
     request['resolve']['ruling'] = ruling
     assert native(request)['decision'] == decision
+for fixture, expected in [('baseline', 'deliver'), ('human-review', 'deliver'), ('custom-result-withheld', 'withhold')]:
+    request = {'version': 6, 'custom_tools': ['text_metrics'],
+        'policy': Path(f'/build/policy-fixtures/{fixture}.toml').read_text(), 'request': {
+            'root_id': 'artifact-root', 'invocation_id': 'artifact-event', 'agent_id': 'artifact',
+            'tool_kind': 'custom', 'tool_name': 'text_metrics', 'arguments': {'text': 'example'}, 'runtime': 'cma'}}
+    call = native(request)
+    if call['decision'] == 'human_review':
+        request['resolve'] = {key: call['review'][key] for key in ('authority', 'fingerprint')}
+        request['resolve']['ruling'] = 'approve'
+        call = native(request)
+    assert call['decision'] == 'allow'
+    request['authorization'] = call['fingerprint']
+    request['result'] = {'text': 'custom output from packaged helper', 'is_error': False}
+    assert native(request) == ({'decision': expected, 'text': request['result']['text']} if expected == 'deliver' else {'decision': expected})
+# Exercise real file-backed state on the packaged platform, across fresh helpers.
+with tempfile.TemporaryDirectory() as directory:
+    request = {'version': 6, 'database': str(Path(directory) / 'state.sqlite'),
+        'custom_tools': ['text_metrics'],
+        'policy': Path('/build/policy-fixtures/stateful-custom.toml').read_text(), 'request': {
+            'root_id': 'persisted-root', 'invocation_id': 'persisted-call', 'agent_id': 'artifact',
+            'tool_kind': 'custom', 'tool_name': 'text_metrics', 'arguments': {'text': 'synthetic'}, 'runtime': 'cma'}}
+    review = native(request)
+    assert review['decision'] == 'human_review'
+    request['resolve'] = {key: review['review'][key] for key in ('authority', 'fingerprint')}
+    request['resolve']['ruling'] = 'approve'
+    call = native(request)
+    assert call['decision'] == 'allow'
+    request['authorization'] = call['fingerprint']
+    request['result'] = {'text': 'synthetic HR result', 'is_error': False}
+    assert native(request) == {'decision': 'deliver', 'text': 'synthetic HR result'}
+    restored = str(Path(directory) / 'standalone.sqlite')
+    with closing(sqlite3.connect(request['database'])) as source, closing(sqlite3.connect(restored)) as target:
+        source.backup(target)
+        assert target.execute('PRAGMA journal_mode=DELETE').fetchone() == ('delete',)
+        assert target.execute('PRAGMA quick_check').fetchone() == ('ok',)
+    request['database'] = restored
+    assert native(request) == {'decision': 'deliver', 'text': 'synthetic HR result'}  # Native receipt, no second admission.
+    for key in ('resolve', 'authorization', 'result'):
+        request.pop(key)
+    for recipient, decision in [('public', 'deny'), ('hr', 'allow')]:
+        request['request'].update(invocation_id=recipient, tool_kind='builtin',
+            tool_name='web_fetch', arguments={'to': recipient})
+        assert native(request)['decision'] == decision
+# Exercise output sanitization, state and history remedies on the packaged platform.
+with tempfile.TemporaryDirectory() as directory:
+    request = {'version': 6, 'database': str(Path(directory) / 'demo.sqlite'),
+        'custom_tools': ['text_metrics', 'demo_read_private_report', 'demo_read_contact_report',
+                         'demo_prepare_release', 'demo_publish_report'],
+        'policy': Path('/build/managed_agents_app/policy/appa.toml').read_text(), 'request': {
+            'root_id': 'demo-root', 'invocation_id': 'redact', 'agent_id': 'artifact',
+            'tool_kind': 'custom', 'tool_name': 'demo_read_contact_report', 'arguments': {}, 'runtime': 'cma'}}
+    def call(name, event, arguments=None):
+        for key in ('resolve', 'authorization', 'result'):
+            request.pop(key, None)
+        request['request'].update(tool_name=name, invocation_id=event, arguments=arguments or {})
+        return native(request)
+    def resolve(review, ruling='approve'):
+        request['resolve'] = {key: review['review'][key] for key in ('authority', 'fingerprint')}
+        request['resolve']['ruling'] = ruling
+        return native(request)
+    def result(allowed, text):
+        request['authorization'] = allowed['fingerprint']
+        request['result'] = {'text': text, 'is_error': False}
+        return native(request)
+    allowed = native(request)
+    assert allowed['decision'] == 'allow'
+    assert result(allowed, 'Contact alex@example.com today.') == {
+        'decision': 'deliver', 'text': 'Contact [redacted-email] today.'}
+    assert call('demo_publish_report', 'missing', {'audience': 'public', 'text': 'synthetic'})['decision'] == 'deny'
+    result(call('demo_prepare_release', 'prepare'), 'Prepared')
+    review = call('demo_publish_report', 'publish', {'audience': 'public', 'text': 'synthetic'})
+    assert review['decision'] == 'human_review'
+    result(resolve(review), 'Simulated publication')
+    repeat = call('demo_publish_report', 'repeat', {'audience': 'public', 'text': 'synthetic'})
+    assert 'demo.report_published' in repeat['review']['description']
+    assert resolve(repeat, 'deny')['decision'] == 'deny'
+    private = call('demo_read_private_report', 'private')
+    result(resolve(private), 'Synthetic private report')
+    assert call('demo_publish_report', 'blocked', {'audience': 'public', 'text': 'synthetic'})['decision'] == 'deny'
+    assert call('demo_read_contact_report', 'blocked-read')['decision'] == 'deny'
 output = Path('/output')
 for name, launcher in [('python-buffered', None), ('cma-controller', 'run_cma_controller.sh'), ('a2a-event-sink', 'run_a2a_event_sink.sh')]:
     target = output / 'lambdas' / name

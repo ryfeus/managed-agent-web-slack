@@ -77,6 +77,16 @@ def inspect_binding(
             if tasks
             else []
         )
+        tool_executions = (
+            conn.execute(
+                "SELECT task_id, cma_event_id, invocation_id, state, control_code, "
+                "execution_attempted_at, delivery_attempted_at, result_digest "
+                "FROM cma_tool_executions WHERE task_id = ANY(%s) ORDER BY created_at",
+                ([row["task_id"] for row in tasks],),
+            ).fetchall()
+            if tasks
+            else []
+        )
         context = (
             conn.execute(
                 "SELECT cma_session_id FROM cma_contexts WHERE context_id = %s",
@@ -105,8 +115,40 @@ def inspect_binding(
         for request in input_requests:
             event_id = str(request["cma_event_id"])
             source = by_id.get(event_id, {})
+            result_key = (
+                "custom_tool_use_id" if source.get("type") == "agent.custom_tool_use" else "tool_use_id"
+            )
+            results = [e for e in events if e.get(result_key) == event_id and "result" in str(e.get("type"))]
+            metrics_match = None
+            if source.get("name") == "text_metrics" and len(results) == 1 and not results[0].get("is_error"):
+                text = source.get("input", {}).get("text")
+                try:
+                    metrics = json.loads(results[0]["content"][0]["text"])
+                    metrics_match = isinstance(text, str) and metrics == {
+                        "characters": len(text),
+                        "utf8_bytes": len(text.encode("utf-8")),
+                    }
+                except (ValueError, KeyError, IndexError, TypeError):
+                    metrics_match = False
+            demo_evidence = {}
+            if source.get("name") in {"demo_read_contact_report", "demo_publish_report"}:
+                from managed_agents_app.cma_controller.custom_tools import DEMO_REPORT
+
+                admitted_report = DEMO_REPORT.replace("alex@example.com", "[redacted-email]")
+                if source["name"] == "demo_read_contact_report":
+                    demo_evidence["redaction_match"] = (
+                        len(results) == 1
+                        and results[0].get("content") == [{"type": "text", "text": admitted_report}]
+                        and not results[0].get("is_error")
+                    )
+                else:
+                    demo_evidence["published_admitted_report"] = source.get("input") == {
+                        "audience": "public",
+                        "text": admitted_report,
+                    }
             evidence.append(
                 {
+                    **demo_evidence,
                     "request_id": request["request_id"],
                     "tool_name": source.get("name"),
                     "confirmation_decisions": [
@@ -114,16 +156,9 @@ def inspect_binding(
                         for e in events
                         if e.get("type") == "user.tool_confirmation" and e.get("tool_use_id") == event_id
                     ],
-                    "result_event_types": [
-                        str(e.get("type"))
-                        for e in events
-                        if e.get("tool_use_id") == event_id and "result" in str(e.get("type"))
-                    ],
-                    "result_errors": [
-                        bool(e.get("is_error"))
-                        for e in events
-                        if e.get("tool_use_id") == event_id and "result" in str(e.get("type"))
-                    ],
+                    "result_event_types": [str(e.get("type")) for e in results],
+                    "result_errors": [bool(e.get("is_error")) for e in results],
+                    **({"metrics_match": metrics_match} if metrics_match is not None else {}),
                 }
             )
         for request in clarification_requests:
@@ -157,6 +192,7 @@ def inspect_binding(
                 "task_state": row["last_task_state"],
                 "controller_state": row["a2a_state"],
                 "push_delivered": row["push_delivered"],
+                "tool_executions": [item for item in tool_executions if item["task_id"] == row["task_id"]],
                 "clarification_requests": [
                     {"request_id": request["request_id"], "status": request["status"]}
                     for request in clarification_requests

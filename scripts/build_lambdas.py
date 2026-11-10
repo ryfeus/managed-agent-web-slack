@@ -87,7 +87,8 @@ def main():
             + resolved.encode()
             + b"python3.14-linux-amd64"
         ).hexdigest()
-        # Construct a minimal context: neither secrets nor generated files are sent to Docker.
+        run(["python3", "scripts/prepare_openappa.py"])
+        # Construct a minimal context including only the verified native source.
         with tempfile.TemporaryDirectory(prefix="lambda-context-") as directory:
             context = Path(directory) / "context"
             context.mkdir()

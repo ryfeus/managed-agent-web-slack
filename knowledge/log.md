@@ -1,5 +1,9 @@
 # Knowledge Update Log
 
+## 2026-11-10
+
+- **Persistent native policy migration**: Updated [policy operations](areas/openappa-cma-policy-state.md) for protocol 6, migrations 013–015, private SQLite/S3 checkpoints, stored native review offers and admitted custom results. Preserved historical snapshot-retention guidance and linked the public upgrade procedure. The note is stable within its documented mediation and recovery limits; historical sandbox acceptance remains separate from this public migration's local verification.
+
 ## 2026-10-31
 
 - **Phase 4 Slack manifest applied**: With the supplied local configuration token, exported/validated/applied the bot cleanup and verified the result: seven bot scopes, five event types, no unfurls, Socket Mode disabled. Preserved existing org readiness and user OAuth/MCP settings. Genuine mention/reply, automatic tool, clarification and Stop verification passed after the update. The installed bot token retains five removed scopes; [Slack setup](../docs/slack-setup.md) distinguishes manifest configuration from credential revocation/reinstallation.

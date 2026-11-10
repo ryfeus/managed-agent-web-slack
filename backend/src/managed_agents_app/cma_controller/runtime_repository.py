@@ -12,6 +12,7 @@ from psycopg.errors import UniqueViolation
 
 from managed_agents_app.cma_controller.repository import CmaControllerRepository
 from managed_agents_app.db.connection import connect, with_dsql_retry
+from managed_agents_app.policy.models import PolicyCheckpoint
 
 
 class LostSchedulerClaim(RuntimeError):
@@ -114,8 +115,58 @@ class ControllerRuntimeRepository(CmaControllerRepository):
             cur.execute("SELECT * FROM cma_contexts WHERE cma_session_id = %s", (session_id,))
             return cur.fetchone()
 
+    def commit_policy_checkpoint(
+        self,
+        cursor: Any,
+        context_id: str,
+        task_id: str,
+        claim_id: str,
+        checkpoint: PolicyCheckpoint | None,
+    ) -> None:
+        if checkpoint is None:
+            return
+        cursor.execute(
+            "UPDATE cma_contexts SET policy_checkpoint_key = %s, policy_checkpoint_revision = %s, "
+            "policy_digest = %s WHERE context_id = %s AND active_task_id = %s "
+            "AND scheduler_claim_id = %s AND scheduler_lease_expires_at > CURRENT_TIMESTAMP "
+            "AND COALESCE(policy_checkpoint_revision, 0) = %s "
+            "AND (policy_digest IS NULL OR policy_digest = %s) AND EXISTS "
+            "(SELECT 1 FROM cma_tasks t WHERE t.task_id = cma_contexts.active_task_id "
+            "AND t.cancel_requested_at IS NULL AND t.internal_state <> 'terminal' FOR UPDATE OF t) "
+            "RETURNING context_id",
+            (
+                checkpoint.key,
+                checkpoint.expected_revision + 1,
+                checkpoint.policy_digest,
+                context_id,
+                task_id,
+                claim_id,
+                checkpoint.expected_revision,
+                checkpoint.policy_digest,
+            ),
+        )
+        if cursor.fetchone() is None:
+            raise LostSchedulerClaim(context_id)
+
+    def policy_checkpoint_keys(self) -> set[str]:
+        with connect(self.config, self.role) as conn:
+            return {
+                str(row["policy_checkpoint_key"])
+                for row in conn.execute(
+                    "SELECT policy_checkpoint_key FROM cma_contexts WHERE policy_checkpoint_key IS NOT NULL"
+                ).fetchall()
+            }
+
     def record_policy_decision(
-        self, context_id: str, task_id: str, claim_id: str, request_id: str, decision: str
+        self,
+        context_id: str,
+        task_id: str,
+        claim_id: str,
+        request_id: str,
+        decision: str,
+        *,
+        authorization_object_key: str | None = None,
+        checkpoint: PolicyCheckpoint | None = None,
     ) -> None:
         """Commit the authorization checkpoint before any provider side effect.
 
@@ -141,6 +192,15 @@ class ControllerRuntimeRepository(CmaControllerRepository):
                 )
                 if cur.fetchone() is None:
                     raise LostSchedulerClaim(context_id)
+                self.commit_policy_checkpoint(cur, context_id, task_id, claim_id, checkpoint)
+                cur.execute(
+                    "UPDATE cma_tool_executions SET authorization_object_key = %s, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE task_id = %s AND cma_event_id = "
+                    "(SELECT cma_event_id FROM cma_input_requests WHERE request_id = %s) RETURNING *",
+                    (authorization_object_key, task_id, request_id),
+                )
+                if cur.fetchone() is not None and decision == "allow" and not authorization_object_key:
+                    raise ValueError("Custom execution requires native authorization evidence")
 
         with_dsql_retry(operation)
 
@@ -153,6 +213,7 @@ class ControllerRuntimeRepository(CmaControllerRepository):
         digest: str | None,
         authority: str | None,
         object_key: str | None,
+        checkpoint: PolicyCheckpoint | None = None,
     ) -> None:
         """Rotate the surface ID on every new offer; an old button cannot grant new consent."""
 
@@ -183,6 +244,7 @@ class ControllerRuntimeRepository(CmaControllerRepository):
                 )
                 if cur.fetchone() is None:
                     raise LostSchedulerClaim(context_id)
+                self.commit_policy_checkpoint(cur, context_id, task_id, claim_id, checkpoint)
 
         with_dsql_retry(operation)
 
@@ -320,6 +382,14 @@ class ControllerRuntimeRepository(CmaControllerRepository):
                 "WHERE answer_object_key IS NOT NULL AND status <> 'resolved'"
             )
             keys.update(str(row["answer_object_key"]) for row in cur.fetchall())
+            cur.execute(
+                "SELECT e.authorization_object_key, e.result_object_key, e.admitted_result_object_key "
+                "FROM cma_tool_executions e "
+                "JOIN cma_tasks t ON t.task_id = e.task_id "
+                "WHERE e.state <> 'resolved' AND t.internal_state <> 'terminal'"
+            )
+            for row in cur.fetchall():
+                keys.update(str(value) for value in row.values() if value)
             return keys
 
     def stale_pending_input_count(self) -> int:

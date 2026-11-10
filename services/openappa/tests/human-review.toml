@@ -9,6 +9,11 @@ context_control = false
 confined_results = []
 
 [[policy.tool]]
+name = "host/cma-custom/text_metrics"
+requires = { attention = ["user-approval"] }
+delta = {}
+
+[[policy.tool]]
 name = "host/cma/web_fetch"
 delta = {}
 

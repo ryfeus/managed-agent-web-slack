@@ -29,3 +29,4 @@ playwright-report-production/
 test-results/
 
 services/openappa/target/
+services/openappa/upstream/

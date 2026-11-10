@@ -27,6 +27,7 @@ TABLES = (
     "cma_tasks",
     "cma_input_requests",
     "cma_clarification_requests",
+    "cma_tool_executions",
     "cma_push_configs",
     "surface_ingress_events",
     "slack_task_projections",
@@ -96,11 +97,14 @@ def router(runtime: Runtime) -> APIRouter:
     @api.post("/policy")
     def policy(body: Annotated[dict[str, Any], Body()]) -> dict[str, bool]:
         name = body.get("fixture")
-        if name not in {"baseline", "human-review"}:
+        if name not in {"baseline", "human-review", "custom-result-withheld"}:
             raise ValueError("Unknown local policy fixture")
         path = Path(__file__).resolve().parents[4] / "services/openappa/tests" / (name + ".toml")
         harness.composition.scheduler.policy_engine = OpenAppaPolicyEngine(
-            runtime.config.openappa_binary_path, str(path)
+            runtime.config.openappa_binary_path,
+            str(path),
+            custom_tools=harness.composition.scheduler.custom_tools.registry.names,
+            snapshots=harness.composition.scheduler.snapshots,
         )
         return {"ok": True}
 

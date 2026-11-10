@@ -199,6 +199,9 @@ resource "aws_iam_role_policy" "lambda_access" {
         Effect   = "Allow", Action = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
         Resource = "${aws_s3_bucket.cma_pending_input.arn}/pending/*"
         }, {
+        Effect   = "Allow", Action = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+        Resource = "${aws_s3_bucket.cma_pending_input.arn}/policy/*"
+        }, {
         Effect   = "Allow", Action = ["s3:ListBucket"]
         Resource = aws_s3_bucket.cma_pending_input.arn
       }] : [],

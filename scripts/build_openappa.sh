@@ -10,6 +10,7 @@ if ! command -v cargo >/dev/null; then
   echo 'OpenAPPA requires Rust 1.99 or newer (cargo and rustc).' >&2
   exit 1
 fi
+python3 scripts/prepare_openappa.py
 cargo build --locked --manifest-path services/openappa/Cargo.toml
 mkdir -p .generated/openappa-bin
 cp services/openappa/target/debug/openappa-cma .generated/openappa-bin/openappa-cma

@@ -183,13 +183,23 @@ run "human_review_permissions" {
     condition = alltrue([for name, policy in aws_iam_role_policy.lambda_access :
       alltrue([for statement in jsondecode(policy.policy).Statement :
         !contains(statement.Action, "s3:PutObject") || (
-          contains(["cma-controller", "cma-scheduler"], name) &&
-          statement.Resource == "${aws_s3_bucket.cma_pending_input.arn}/pending/*"
+          (contains(["cma-controller", "cma-scheduler"], name) &&
+          statement.Resource == "${aws_s3_bucket.cma_pending_input.arn}/pending/*") ||
+          (name == "cma-scheduler" && statement.Resource == "${aws_s3_bucket.cma_pending_input.arn}/policy/*")
         )
       ])
     ])
-    error_message = "Temporary review/input writes must stay controller-private and scoped to the pending prefix."
+    error_message = "Temporary input writes stay controller-private; only the scheduler can write policy checkpoints."
   }
+  assert {
+    condition = alltrue([for name, policy in aws_iam_role_policy.lambda_access :
+      alltrue([for statement in jsondecode(policy.policy).Statement :
+        statement.Resource != "${aws_s3_bucket.cma_pending_input.arn}/policy/*" || name == "cma-scheduler"
+      ])
+    ])
+    error_message = "Native policy snapshots are scheduler-private."
+  }
+
 }
 
 run "web_function_network_and_trust_contract" {

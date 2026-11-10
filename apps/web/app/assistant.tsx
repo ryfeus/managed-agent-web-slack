@@ -344,6 +344,16 @@ function AgUiThreadRuntime({ threadId, threads, onSelect, onCreate, onUpdate, on
               <span>✦</span>
               <h2>Start a durable conversation</h2>
               <p>The same conversation can continue here and in a linked Slack thread.</p>
+              <p>Try a synthetic policy demo. Choose a prompt, then send it.</p>
+              <div className="demo-prompts">
+                {[
+                  ["Human publication review", "Use demo_prepare_release, then demo_publish_report with audience public and text 'Synthetic launch announcement'. Wait for each result."],
+                  ["Accumulated restrictions", "Use demo_read_private_report and show me its synthetic report. Wait for my next instruction before doing anything else."],
+                  ["Redact before publishing", "Use demo_read_contact_report, then demo_prepare_release, then demo_publish_report with audience public and the exact admitted report text. Wait for each result."],
+                ].map(([label, prompt]) => (
+                  <button key={label} type="button" onClick={() => runtime.thread.composer.setText(prompt)}>{label}</button>
+                ))}
+              </div>
             </div>
           </ThreadPrimitive.Empty>
           <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />

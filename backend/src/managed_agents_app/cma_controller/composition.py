@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 
+from managed_agents_app.cma_controller.custom_tools import CustomToolRegistry, default_custom_tools
 from managed_agents_app.cma_controller.pending_input import FilePendingInputStore, PendingInputStore
 from managed_agents_app.cma_controller.pending_input_s3 import S3PendingInputStore
 from managed_agents_app.cma_controller.preview import production_preview_trigger
@@ -25,6 +26,7 @@ from managed_agents_app.config import AppConfig
 from managed_agents_app.managed_agent.client import ManagedAgentClient
 from managed_agents_app.policy.models import ToolPolicyEngine
 from managed_agents_app.policy.openappa import OpenAppaPolicyEngine
+from managed_agents_app.policy.snapshots import FileSnapshotStore, S3SnapshotStore
 
 
 @dataclass
@@ -57,6 +59,7 @@ def build_controller(
     push_http: httpx.AsyncClient | None = None,
     with_dispatcher: bool = True,
     policy_engine: ToolPolicyEngine | None = None,
+    custom_tools: CustomToolRegistry | None = None,
 ) -> ControllerComposition:
     repository = repository or ControllerRuntimeRepository(config)
     provider = provider or AnthropicCmaProvider(ManagedAgentClient(config))
@@ -85,7 +88,20 @@ def build_controller(
         raise RuntimeError("Push callback policy requires a runnable push worker")
 
     service = ControllerService(repository, provider, pending_input, scheduler_trigger, push_trigger)
+    custom_tools = custom_tools or default_custom_tools()
     policy_directory = Path(__file__).resolve().parents[1] / "policy"
+    snapshots = (
+        S3SnapshotStore(config.cma_pending_input_bucket)
+        if config.cma_pending_input_bucket
+        else FileSnapshotStore(
+            (
+                pending_input.directory
+                if isinstance(pending_input, FilePendingInputStore)
+                else Path(os.getenv("CMA_PENDING_INPUT_DIR", "/tmp/cma-pending-input"))
+            )
+            / "policy"
+        )
+    )
     policy_engine = policy_engine or OpenAppaPolicyEngine(
         config.openappa_binary_path
         or str(
@@ -94,6 +110,8 @@ def build_controller(
             else Path(__file__).resolve().parents[4] / ".generated/openappa-bin/openappa-cma"
         ),
         config.openappa_policy_path or str(policy_directory / "appa.toml"),
+        custom_tools=custom_tools.names,
+        snapshots=snapshots,
     )
     scheduler = CmaScheduler(
         repository,
@@ -102,6 +120,8 @@ def build_controller(
         scheduler_trigger,
         push_trigger,
         policy_engine=policy_engine,
+        custom_tools=custom_tools,
+        snapshots=snapshots,
         preview_trigger=(
             production_preview_trigger(config.cma_preview_queue_url)
             if config.preview_enabled and config.cma_preview_queue_url
