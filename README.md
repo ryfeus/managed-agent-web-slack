@@ -35,6 +35,10 @@ The durable P0 path completes without provider SSE or preview transport. OpenAPP
 
 Application-owned custom tools also pass native result admission. The [synthetic policy demos](docs/policy-demos.md) show persisted restrictions, exact-call human review and email redaction before simulated publication. Web starter buttons prefill prompts without sending them.
 
+Try the [standalone support-triage example](examples/support-triage/README.md) with
+`npm run example:support-triage`: mocked ticket/log/issue tools, real native secret
+masking and history-dependent review, without CMA or cloud credentials.
+
 Optional Slack previews show a rolling `Draft: …` title on an existing task card. Canonical Markdown remains authoritative. The same CMA reader feeds independent Web and Slack AppSync subscribers; drafts stay in memory. `SLACK_PREVIEW_ENABLED=false` is the default and enabling it also requires `PREVIEW_ENABLED=true`. See the [Phase 6 rollout note](docs/phase-6-rollout.md) for limits and remaining live acceptance.
 
 ## Run locally

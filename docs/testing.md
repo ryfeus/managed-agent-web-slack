@@ -1,5 +1,7 @@
 # Testing
 
+`npm run check` also builds and runs the [standalone support-triage tests](../examples/support-triage/README.md#tests). They exercise real pinned OpenAPPA in fresh helper subprocesses with temporary SQLite: exact secret masking, history-dependent review, repeated Allow/Deny, invalid inputs, withheld output, unsupported remedies and missing state. Business tools and CMA delivery are mocked; this does not establish live-provider acceptance.
+
 | Command | Evidence |
 | --- | --- |
 | `npm run check` | Pinned native Rust build/tests, local CMA lock validation, destructive-deploy guard, ESLint/Ruff/format, TypeScript/mypy, Python unit/contracts, E2E helpers and TypeScript gateway/observer/AppSync protocol tests; no Docker/cloud/browser |

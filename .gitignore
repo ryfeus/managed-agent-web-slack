@@ -30,3 +30,4 @@ test-results/
 
 services/openappa/target/
 services/openappa/upstream/
+examples/support-triage/target/

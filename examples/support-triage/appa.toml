@@ -1,0 +1,49 @@
+[policy]
+version = 2
+
+[policy.deployment]
+dispatch = "enforced"
+starting_label = { audience = ["public"] }
+provider_run_tools = []
+context_control = false
+confined_results = ["host/cma-custom/fetch_logs"]
+
+[[policy.tool]]
+name = "host/cma-custom/read_ticket"
+parameters = { type = "object", properties = { ticket_id = { type = "string", enum = ["T-4821"] } }, required = ["ticket_id"], additionalProperties = false }
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "host/cma-custom/fetch_logs"
+tags = ["support-logs"]
+parameters = { type = "object", properties = { ticket_id = { type = "string", enum = ["T-4821"] } }, required = ["ticket_id"], additionalProperties = false }
+delta = { audience = ["self"] }
+
+[[policy.sanitizer]]
+name = "mask-secrets"
+tags = ["support-logs"]
+on = ["tool_output"]
+permits.audience = { from = ["self"], to = ["internal"] }
+
+[[policy.tool]]
+name = "host/cma-custom/create_issue"
+tags = ["support-issues"]
+parameters = { type = "object", properties = { tracker = { type = "string", enum = ["internal", "public"] }, title = { type = "string" }, body = { type = "string" } }, required = ["tracker", "title", "body"], additionalProperties = false }
+requires = { audience = { contains = ["$tracker"] } }
+delta = {}
+
+[[policy.authority]]
+name = "maintainer"
+tags = ["support-issues"]
+hint = "Review this exact simulated public issue. Approval permits this call only; the session remains internal."
+permits.audience_missing = ["public"]
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+[externals.authorities.maintainer]
+builtin = "hitl"
+
+[externals.sanitizers.mask-secrets]
+builtin = "redact-secrets"
