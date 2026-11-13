@@ -1,0 +1,21 @@
+[package]
+name = "support-triage-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "support-triage"
+path = "main.rs"
+
+[dependencies]
+# Prepared and revision-verified by scripts/prepare_openappa.py, as for the app.
+appa = { path = "../../services/openappa/upstream/appa-runtime", default-features = false }
+appa-eventlog = { path = "../../services/openappa/upstream/appa-eventlog" }
+appa-runtime-api = { path = "../../services/openappa/upstream/appa-runtime-api" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.10"
+toml = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

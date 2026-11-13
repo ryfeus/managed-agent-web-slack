@@ -36,6 +36,7 @@
     "cma:show": "./scripts/cma.sh show",
     "e2e:production": "PYTHONDONTWRITEBYTECODE=1 python3 scripts/local.py production",
     "build:openappa": "./scripts/build_openappa.sh --test",
+    "example:support-triage": "bash scripts/support_triage.sh",
     "test:live": "PYTHONDONTWRITEBYTECODE=1 UV_CACHE_DIR=.uv-cache uv run --directory backend python ../scripts/live.py",
     "check": "./scripts/check.sh",
     "verify:full": "npm run check && npm run e2e:production && npm run build:python && npm run build:functions && npm run terraform:validate && npm run e2e",
