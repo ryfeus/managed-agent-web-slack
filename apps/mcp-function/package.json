@@ -1,0 +1,25 @@
+{
+  "name": "@managed-agents/mcp-function",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@managed-agents/agent-client": "0.1.0",
+    "@modelcontextprotocol/server": "2.4.0",
+    "@hono/node-server": "2.1.5",
+    "hono": "4.13.14",
+    "jose": "6.2.17",
+    "zod": "4.6.7",
+    "postgres": "3.4.7",
+    "@a2a-js/sdk": "1.3.0"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0"
+  }
+}

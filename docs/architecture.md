@@ -12,6 +12,8 @@ Web and Slack operate on application threads and A2A Tasks. Only the private con
 
 ## Durable execution and recovery
 
+The optional `apps/mcp-function` surface uses Cognito bearer authentication and exact issuer/subject mapping before checking thread ownership. It shares the TypeScript thread/A2A client with Web, submits Tasks under a separate message namespace and exposes canonical public text/status plus explicit Stop. Its separate Web Function uses the existing VPC connector and restricted `mcp_runtime` DSQL grants; it has no provider or policy credentials. Human input stays on Web. See [MCP setup](mcp-setup.md).
+
 The earliest nonterminal Task is active. Send, history, resume, pending input and Stop select that same FIFO Task. Verified Anthropic webhooks wake the queued scheduler; a 30-second reconciliation schedule recovers missed notifications. Scheduler workers hold a fenced context lease and re-read canonical CMA history. No P0 completion path requires CMA SSE, AppSync or live tokens.
 
 `SubscribeToTask` is a notification stream, not replay. Web loads canonical `GetTask` history before subscribing and reconciles after closure/failure, deduplicating A2A message IDs. A newer resume snapshot refreshes loaded history. Reload/disconnect never cancels; explicit Stop calls A2A cancellation and controller-private cleanup.

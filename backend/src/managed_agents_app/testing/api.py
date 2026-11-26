@@ -73,6 +73,9 @@ def router(runtime: Runtime) -> APIRouter:
         runtime.db.ensure_principal(runtime.config.dev_principal_id)
         runtime.db.map_external_identity(runtime.config.dev_principal_id, "web", "development", "single-user")
         runtime.db.map_external_identity(runtime.config.dev_principal_id, "slack", "T001", "U001")
+        runtime.db.map_external_identity(
+            runtime.config.dev_principal_id, "cognito", "http://127.0.0.1/local-issuer", "local-user"
+        )
         other = "00000000-0000-4000-8000-000000000002"
         runtime.db.ensure_principal(other)
         runtime.db.map_external_identity(other, "slack", "T001", "U002")

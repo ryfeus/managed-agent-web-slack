@@ -57,6 +57,7 @@ jobs:
           touch dist/lambdas/python-buffered.zip \
             dist/lambdas/a2a-event-sink.zip \
             dist/lambdas/web-function.zip \
+            dist/lambdas/mcp-function.zip \
             dist/lambdas/cma-preview.zip \
             dist/lambdas/slack-preview.zip \
             dist/lambdas/cma-controller.zip

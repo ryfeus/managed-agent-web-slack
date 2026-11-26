@@ -1,5 +1,9 @@
 # No AWS credentials or network calls: exercise the real graph with provider mocks.
 mock_provider "aws" {
+  mock_resource "aws_iam_role" {
+    override_during = plan
+    defaults        = { arn = "arn:aws:iam::000000000000:role/fixture" }
+  }
   mock_resource "aws_subnet" {
     override_during = plan
   }
@@ -61,6 +65,46 @@ variables {
   claude_environment_id = "env_fixture"
 }
 
+run "mcp_identity_and_private_execution_boundary" {
+  command = plan
+  override_resource {
+    target          = aws_iam_role.mcp_function[0]
+    override_during = plan
+    values          = { arn = "arn:aws:iam::000000000000:role/fixture-mcp" }
+  }
+  variables {
+    mcp_enabled    = true
+    public_app_url = "https://app.example.test"
+  }
+  assert {
+    condition = (
+      aws_cognito_user_pool.mcp[0].admin_create_user_config[0].allow_admin_create_user_only &&
+      aws_cognito_user_pool.mcp[0].deletion_protection == "ACTIVE" &&
+      alltrue([for client in aws_cognito_user_pool_client.mcp : !client.generate_secret && client.allowed_oauth_flows == toset(["code"])])
+    )
+    error_message = "Personal MCP requires provisioned users and public authorization-code clients."
+  }
+  assert {
+    condition = (
+      length(jsondecode(aws_iam_role_policy.mcp_function[0].policy).Statement) == 1 &&
+      jsondecode(aws_iam_role_policy.mcp_function[0].policy).Statement[0].Action == ["dsql:DbConnect"] &&
+      !contains(output.dsql_runtime_role_arns, aws_iam_role.mcp_function[0].arn) &&
+      !strcontains(aws_cloudformation_stack.mcp_function[0].template_body, "SECRET")
+    )
+    error_message = "MCP must have no provider secrets or broad app_runtime binding."
+  }
+  assert {
+    condition = (
+      strcontains(aws_cloudformation_stack.mcp_function[0].template_body, "AuthType: IamAuth") &&
+      strcontains(aws_cloudformation_stack.mcp_function[0].template_body, "SigningBehavior: always-amz-auth") &&
+      aws_cloudfront_cache_policy.mcp[0].min_ttl == 0 &&
+      aws_cloudfront_cache_policy.mcp[0].default_ttl == 0 &&
+      contains(aws_cloudfront_cache_policy.mcp[0].parameters_in_cache_key_and_forwarded_to_origin[0].headers_config[0].headers[0].items, "Authorization")
+    )
+    error_message = "MCP must preserve bearer authorization through its protected CloudFront origin."
+  }
+}
+
 run "shared_versioned_artifacts" {
   command = plan
 
@@ -71,7 +115,7 @@ run "shared_versioned_artifacts" {
 
   assert {
     condition = (
-      length(aws_s3_object.lambda_artifact) == 6 &&
+      length(aws_s3_object.lambda_artifact) == 7 &&
       length([for function in aws_lambda_function.app : function.s3_key if function.s3_key == "lambda/python-buffered.zip"]) == 6
     )
     error_message = "The six Python buffered functions share a ZIP; three independent TypeScript artifacts are added."

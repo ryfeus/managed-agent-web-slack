@@ -42,13 +42,20 @@ resource "aws_s3_bucket_policy" "lambda_artifacts" {
       Action    = ["s3:GetObject", "s3:GetObjectVersion"]
       Resource  = "${aws_s3_bucket.lambda_artifacts.arn}/lambda/web-function.zip"
       Condition = { ArnLike = { "aws:SourceArn" = "${local.web_function_arn}/revision/*" } }
+      }, {
+      Sid       = "McpFunctionImmutableRevisions"
+      Effect    = "Allow"
+      Principal = { Service = "lambda.amazonaws.com" }
+      Action    = ["s3:GetObject", "s3:GetObjectVersion"]
+      Resource  = "${aws_s3_bucket.lambda_artifacts.arn}/lambda/mcp-function.zip"
+      Condition = { ArnLike = { "aws:SourceArn" = "${local.mcp_function_arn}/revision/*" } }
     }]
   })
   depends_on = [aws_s3_bucket_public_access_block.lambda_artifacts]
 }
 
 resource "aws_s3_object" "lambda_artifact" {
-  for_each     = toset(concat(values(local.lambda_artifacts), ["web-function.zip", "cma-preview.zip", "slack-preview.zip"]))
+  for_each     = toset(concat(values(local.lambda_artifacts), ["web-function.zip", "cma-preview.zip", "slack-preview.zip", "mcp-function.zip"]))
   bucket       = aws_s3_bucket.lambda_artifacts.id
   key          = "lambda/${each.key}"
   source       = "${path.module}/../../dist/lambdas/${each.key}"

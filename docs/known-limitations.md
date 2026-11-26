@@ -2,6 +2,8 @@
 
 These are behavior gaps, not permissions to disable tests. Keep focused regression cases enabled and distinguish deterministic local evidence from live-provider acceptance.
 
+- **MCP client coverage.** The [SDK harness](mcp-setup.md#acceptance-and-rollback) exercises OAuth and the seven tools. Native Claude Code, Codex, Cowork and ChatGPT interoperability still needs verification. Reviews and clarification require the owner to open the Web app.
+
 - **Standalone narrowing remedy:** the production CMA adapter does not select a plain native `Accept` offer for audience narrowing. The [support-triage example](../examples/support-triage/README.md) accepts that remedy only for its mocked ticket read in an isolated native runner; its policy cannot simply replace the application's default policy. This local example supplies no live ticketing integration or CMA/Slack acceptance evidence.
 
 - **Slack preview acceptance:** the originating sandbox was deployed with both preview switches and mappings disabled; [historical deployment checks](phase-6-rollout.md#infrastructure-and-verification) passed, but native Slack-client acceptance remains outstanding. The recorder models same-ID task titles as replacements, but real rendering and final-title cleanup remain unverified. Keep P1 disabled if replacement is ambiguous; never append speculative Markdown/details/output as fallback.

@@ -1,5 +1,4 @@
-import postgres from "postgres";
-import { auroraDSQLPostgres } from "@aws/aurora-dsql-postgresjs-connector";
+import { database } from "@managed-agents/agent-client/database";
 import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { appSync } from "@managed-agents/preview";
 import { ThreadRepository } from "./repository.js";
@@ -21,13 +20,7 @@ export async function compose(env: NodeJS.ProcessEnv): Promise<Runtime & { close
   const origin = env.PUBLIC_APP_URL || "";
   if (!origin || new URL(origin).origin !== origin) throw new Error("PUBLIC_APP_URL must be an exact origin");
   if (!env.CMA_A2A_ENDPOINT || !env.A2A_EVENT_SINK_URL) throw new Error("Missing application A2A endpoints");
-  const options = { max: 5, connect_timeout: 10, idle_timeout: 30, max_lifetime: 300, prepare: false };
-  if (local) {
-    const db = new URL(env.DATABASE_URL || "");
-    if (!['127.0.0.1', 'localhost'].includes(db.hostname) || db.pathname !== "/managed_agents_e2e") throw new Error("E2E requires isolated loopback PostgreSQL");
-  }
-  const sql = local ? postgres(env.DATABASE_URL!, options) : auroraDSQLPostgres({ ...options, host: env.DSQL_ENDPOINT!, region,
-    username: env.DSQL_ROLE || "app_runtime", database: env.DSQL_DATABASE || "postgres", ssl: { rejectUnauthorized: true } });
+  const sql = database(env, env.DSQL_ROLE || "app_runtime");
   const threads = new ThreadRepository(sql);
   const [accessToken, cookieSecret] = await Promise.all([secret("WEB_ACCESS_TOKEN", "WEB_ACCESS_TOKEN_SECRET_ARN"), secret("WEB_COOKIE_SECRET", "WEB_COOKIE_SECRET_SECRET_ARN")]);
   if (!accessToken || cookieSecret.length < 32) throw new Error("Missing Web authentication configuration");

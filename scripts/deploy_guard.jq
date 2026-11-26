@@ -27,6 +27,7 @@
   ] | index($address) == null)
 | select(
     (.type | startswith("aws_cloudformation_"))
+    or (.type | startswith("aws_cognito_"))
     or (.type | startswith("aws_appsync_"))
     or (.type | startswith("aws_subnet"))
     or (.type | startswith("aws_nat_gateway"))
