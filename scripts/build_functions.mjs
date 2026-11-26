@@ -3,7 +3,7 @@ import { mkdir, writeFile, rm } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 
 if (Number(process.versions.node.split(".")[0]) !== 24) throw new Error("Build Lambda functions with Node 24");
-for (const name of ["web-function", "cma-preview", "slack-preview"]) {
+for (const name of ["web-function", "cma-preview", "slack-preview", "mcp-function"]) {
   const directory = `dist/${name}`;
   await rm(directory, { recursive: true, force: true });
   await mkdir(directory, { recursive: true });

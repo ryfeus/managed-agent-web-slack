@@ -22,13 +22,16 @@ class OfflinePolicies:
 def main() -> None:
     os.environ["AWS_DEFAULT_REGION"] = "us-west-2"
     os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
-    template, errors = decode("infra/app/web-function.yaml")
-    if errors:
-        raise ValueError(errors)
-    expanded = transform(template, {}, OfflinePolicies())
     with tempfile.TemporaryDirectory(prefix="phase5-sam-") as directory:
-        path = Path(directory) / "expanded.json"
-        path.write_text(json.dumps(expanded))
+        paths = []
+        for name in ("web-function", "mcp-function"):
+            template, errors = decode(f"infra/app/{name}.yaml")
+            if errors:
+                raise ValueError(errors)
+            expanded = transform(template, {}, OfflinePolicies())
+            path = Path(directory) / f"{name}.json"
+            path.write_text(json.dumps(expanded))
+            paths.append(str(path))
         # cfn-lint's SAM attribute mapping lacks Web Function/connector attributes.
         # Validate actual expanded resources. W3005 is a redundant DependsOn generated
         # by SAM itself; every CloudFormation schema error still fails this command.
@@ -40,7 +43,7 @@ def main() -> None:
                 "--non-zero-exit-code",
                 "error",
                 "-t",
-                str(path),
+                *paths,
                 "infra/app/web-function-policy.yaml",
             ],
             check=True,

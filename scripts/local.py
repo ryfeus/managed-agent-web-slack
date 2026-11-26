@@ -67,6 +67,10 @@ def local_env(ports: dict[str, int]) -> dict[str, str]:
             "LOCAL_PREVIEW_PORT": str(ports.get("preview", 3003)),
             "LOCAL_CMA_URL": f"http://127.0.0.1:{ports.get('controller', ports['backend'] + 1)}",
             "LOCAL_EVENT_BUS_AUTO_DRAIN": "true",
+            "MCP_HTTP_ENDPOINT": f"127.0.0.1:{ports.get('mcp', 3004)}",
+            "MCP_PUBLIC_ORIGIN": f"http://127.0.0.1:{ports.get('mcp', 3004)}",
+            "MCP_OAUTH_ISSUER": "http://127.0.0.1/local-issuer",
+            "MCP_CLIENT_IDS": "local-mcp",
         }
     )
     return env
@@ -92,6 +96,7 @@ def ports() -> dict[str, int]:
             ("backend", 3001),
             ("controller", 3002),
             ("preview", 3003),
+            ("mcp", 3004),
             ("postgres", 54321),
         ):
             listener = stack.enter_context(socket.socket())
@@ -191,6 +196,7 @@ class Stack:
                     "--test",
                     "apps/web-function/tests/repository.postgres.ts",
                     "apps/slack-preview/tests/repository.postgres.ts",
+                    "apps/mcp-function/tests/repository.postgres.ts",
                 ]
             )
         backend = [
@@ -212,6 +218,12 @@ class Stack:
             self.spawn(["node", "dist/web-function/index.js"], "web-function")
         else:
             self.spawn(["node", "--import", "tsx", "apps/web-function/src/index.ts"], "web-function")
+        self.spawn(
+            ["node", "dist/mcp-function/index.js"]
+            if self.mode == "production"
+            else ["node", "--import", "tsx", "apps/mcp-function/src/index.ts"],
+            "mcp-function",
+        )
         if self.mode == "production":
             self.run(["npm", "run", "build:web"])
             self.spawn(
@@ -248,6 +260,7 @@ class Stack:
             try:
                 request(self.env["E2E_BACKEND_URL"] + "/_test/instance")
                 request(self.env["E2E_BASE_URL"])
+                request(self.env["MCP_PUBLIC_ORIGIN"] + "/health")
                 request(self.env["E2E_BACKEND_URL"] + "/_test/reset", {})
                 return
             except OSError:
@@ -287,7 +300,11 @@ def main() -> int:
         stack = Stack(args.mode)
         print(f"Logs: {stack.artifacts}", flush=True)
         stack.start()
-        print(f"Web: {stack.env['E2E_BASE_URL']}  API: {stack.env['E2E_BACKEND_URL']}", flush=True)
+        print(
+            f"Web: {stack.env['E2E_BASE_URL']}  API: {stack.env['E2E_BACKEND_URL']}  "
+            f"MCP: {stack.env['MCP_PUBLIC_ORIGIN']}/mcp",
+            flush=True,
+        )
         if args.mode == "dev":
             while all(child.poll() is None for child in stack.children):
                 time.sleep(0.5)

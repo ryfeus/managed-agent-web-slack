@@ -1,5 +1,7 @@
 # Operations
 
+The optional personal OAuth MCP endpoint has a separate [setup and rollout procedure](mcp-setup.md). Its IAM role must never join the broad `DSQL_RUNTIME_ROLE_ARNS` list.
+
 ## Plan and deploy
 
 Use `AWS_PROFILE=default` unless configured otherwise, default region `us-west-2`, and the existing deployment's `TF_STATE_BUCKET`. Verify `aws sts get-caller-identity --profile "$AWS_PROFILE"` before applying. `EXPECTED_AWS_ACCOUNT_ID` is an optional exact-account assertion. With SSO, export concrete credentials before direct Terraform/Python AWS use; the deployment wrapper handles this itself. Never print credentials.

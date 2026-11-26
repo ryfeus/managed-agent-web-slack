@@ -3,7 +3,7 @@ set -euo pipefail
 export PYTHONDONTWRITEBYTECODE=1
 cd "$(dirname "$0")/.."
 if [[ "${1:-}" == "--functions" ]]; then
-  for artifact in dist/lambdas/web-function.zip dist/lambdas/cma-preview.zip dist/lambdas/slack-preview.zip; do
+  for artifact in dist/lambdas/web-function.zip dist/lambdas/cma-preview.zip dist/lambdas/slack-preview.zip dist/lambdas/mcp-function.zip; do
     [[ -s "$artifact" ]] || { echo "Missing Function artifact: $artifact" >&2; exit 1; }
     unzip -t "$artifact" >/dev/null
     unzip -p "$artifact" index.js | node --input-type=module --check

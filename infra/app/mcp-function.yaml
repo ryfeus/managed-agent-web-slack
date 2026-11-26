@@ -1,0 +1,59 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Personal OAuth MCP gateway with private A2A egress
+Parameters:
+  Name: {Type: String}
+  ArtifactBucket: {Type: String}
+  ArtifactKey: {Type: String}
+  ArtifactVersion: {Type: String}
+  ExecutionRole: {Type: String}
+  LogGroup: {Type: String}
+  ConnectorArn: {Type: String}
+  DsqlEndpoint: {Type: String}
+  A2aEndpoint: {Type: String}
+  PublicOrigin: {Type: String}
+  OAuthIssuer: {Type: String}
+  ClientIds: {Type: String}
+Resources:
+  Mcp:
+    Type: AWS::Serverless::WebFunction
+    UpdateReplacePolicy: Retain
+    Properties:
+      FunctionName: !Ref Name
+      Runtime: nodejs24.x
+      CodeUri:
+        Bucket: !Ref ArtifactBucket
+        Key: !Ref ArtifactKey
+        Version: !Ref ArtifactVersion
+      AuthType: IamAuth
+      EndpointType: HomeRegion
+      EndpointName: prod
+      AutoDeploymentMode: LatestRevision
+      ExecutionRoleArn: !Ref ExecutionRole
+      EgressNetworkConnectorArn: !Ref ConnectorArn
+      Timeout: 60
+      MaxConcurrencyPerEnvironment: 8
+      LoggingConfig: {LogGroup: !Ref LogGroup}
+      EnvironmentVariables:
+        APP_ENV: production
+        DSQL_ENDPOINT: !Ref DsqlEndpoint
+        DSQL_DATABASE: postgres
+        CMA_A2A_ENDPOINT: !Ref A2aEndpoint
+        A2A_EVENT_SINK_URL: !Sub '${A2aEndpoint}/internal/a2a/events'
+        MCP_PUBLIC_ORIGIN: !Ref PublicOrigin
+        MCP_OAUTH_ISSUER: !Ref OAuthIssuer
+        MCP_CLIENT_IDS: !Ref ClientIds
+  Oac:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${Name}-oac'
+        OriginAccessControlOriginType: lambda
+        SigningProtocol: sigv4
+        SigningBehavior: always-amz-auth
+Outputs:
+  FunctionArn: {Value: !GetAtt Mcp.FunctionArn}
+  EndpointDomain: {Value: !GetAtt McpEndpoint.DomainName}
+  EndpointArn: {Value: !GetAtt McpEndpoint.EndpointArn}
+  RevisionId: {Value: !GetAtt McpRevision.RevisionId}
+  OacId: {Value: !GetAtt Oac.Id}

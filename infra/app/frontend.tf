@@ -82,6 +82,37 @@ resource "aws_cloudfront_distribution" "app" {
     }
   }
 
+  dynamic "origin" {
+    for_each = var.mcp_enabled ? [1] : []
+    content {
+      domain_name              = aws_cloudformation_stack.mcp_function[0].outputs["EndpointDomain"]
+      origin_id                = "mcp-function"
+      origin_access_control_id = aws_cloudformation_stack.mcp_function[0].outputs["OacId"]
+      connection_attempts      = 1
+      custom_origin_config {
+        http_port              = 80
+        https_port             = 443
+        origin_protocol_policy = "https-only"
+        origin_ssl_protocols   = ["TLSv1.2"]
+        origin_read_timeout    = 60
+      }
+    }
+  }
+
+  dynamic "ordered_cache_behavior" {
+    for_each = var.mcp_enabled ? toset(["mcp", ".well-known/oauth-protected-resource/mcp"]) : toset([])
+    content {
+      path_pattern             = ordered_cache_behavior.value
+      target_origin_id         = "mcp-function"
+      viewer_protocol_policy   = "https-only"
+      allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+      cached_methods           = ["GET", "HEAD"]
+      cache_policy_id          = aws_cloudfront_cache_policy.mcp[0].id
+      origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_except_host.id
+      compress                 = false
+    }
+  }
+
   restrictions {
     geo_restriction {
       restriction_type = "none"

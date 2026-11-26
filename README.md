@@ -3,6 +3,8 @@
 This is a reference implementation and is not an official Anthropic, Slack, AWS,
 or assistant-ui project.
 
+The [MCP adapter](docs/mcp-setup.md) lets authenticated agent hosts submit work to the same A2A Tasks, check status and hand human review back to the Web app.
+
 A serverless reference application for continuing the same Anthropic Managed Agent conversation from Web and Slack. The application owns authorized threads and A2A Tasks; the private controller owns provider sessions, execution and native OpenAPPA tool policy. Anthropic retains the canonical transcript. OpenAPPA policy state persists as private SQLite snapshots in S3, with fenced checkpoint metadata in DSQL. Aurora DSQL holds identity, routing, idempotency and projection metadata only.
 
 ```mermaid

@@ -107,6 +107,9 @@ class DeploymentGuardTests(unittest.TestCase):
         candidates = {
             "aws_dsql_cluster.app",
             "aws_cloudformation_stack.web_function",
+            "aws_cloudformation_stack.mcp_function[0]",
+            "aws_cognito_user_pool.mcp[0]",
+            'aws_cognito_user_pool_client.mcp["codex"]',
             "aws_appsync_api.preview",
             "aws_subnet.web_private",
             'aws_lambda_function.app["web-api"]',
